@@ -1,0 +1,22 @@
+# Python
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.venv/
+venv/
+*.egg-info/
+
+# Your data: settings (holds the encrypted fixed password), records (may hold passwords and
+# recovery keys), update backups. Never commit these.
+data/
+.update_backup/
+settings.json
+settings.json.*
+*.bad
+usblockbox_log.csv
+
+# Local output / editors
+out/
+*.log
+.vscode/
+.idea/
