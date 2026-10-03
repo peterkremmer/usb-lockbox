@@ -263,3 +263,28 @@ def test_missing_fixed_password_fails_before_any_write(backend, settings):
     scn = scan(backend, settings, "used_files")
     run = Processor(backend, settings).run(scn, None, lambda *_: None)
     assert not run.ok and backend.log == []
+
+
+def test_windows_partition_step_uses_diskpart_and_reports_real_errors(monkeypatch):
+    from usblockbox.backends import windows as w
+    from usblockbox.backends.base import BackendError
+    from usblockbox.models import DriveInfo
+    be = w.WindowsBackend.__new__(w.WindowsBackend)
+    seen = {}
+    monkeypatch.setattr(w.WindowsBackend, "_diskpart", lambda self, s, timeout=120: seen.setdefault("dp", s))
+    monkeypatch.setattr(w, "run_ps", lambda script, env=None, timeout=120: seen.setdefault("ps", script) and "\r\nE\r\n")
+    d = DriveInfo(2, "uid", "ser")
+    assert be.init_partition_format(d, "gpt", "exFAT", "Secure USB!") == "E"
+    assert "select disk 2" in seen["dp"] and "clean" in seen["dp"] and "convert gpt" in seen["dp"]
+    assert "create partition primary" in seen["dp"]
+    assert "ErrorActionPreference='Stop'" in seen["ps"] and "Format-Volume -Partition" in seen["ps"]
+    assert "'Secure USB'" in seen["ps"]                       # label sanitised
+    with pytest.raises(BackendError):
+        be.init_partition_format(d, "weird", "exFAT", "X")
+
+    def fail(self, s, timeout=120):
+        raise BackendError("diskpart failed: not convertible", "DISKPART")
+    monkeypatch.setattr(w.WindowsBackend, "_diskpart", fail)
+    with pytest.raises(BackendError) as e:
+        be.init_partition_format(d, "GPT", "exFAT", "X")
+    assert "not convertible" in str(e.value)

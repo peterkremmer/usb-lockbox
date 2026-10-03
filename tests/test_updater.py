@@ -164,3 +164,19 @@ def test_git_checkout_is_never_modified(tmp_path):
     with pytest.raises(UpdateError, match="git"):
         updater.apply_update(make_zip(GOOD_FILES), tmp_path)
     assert not (tmp_path / "run_station.py").exists()
+
+
+def test_no_release_yet_is_explained_not_called_unreachable():
+    def fetch(url, max_bytes):
+        raise UpdateError("GitHub answered HTTP 404 (Not Found).", status=404)
+    with pytest.raises(UpdateError) as e:
+        updater.check_for_update("0.1.0", "owner/repo", fetch)
+    assert "No release has been published yet" in str(e.value) and "Could not reach" not in str(e.value)
+
+
+def test_other_http_errors_are_passed_through():
+    def fetch(url, max_bytes):
+        raise UpdateError("GitHub answered HTTP 403 (rate limit exceeded).", status=403)
+    with pytest.raises(UpdateError) as e:
+        updater.check_for_update("0.1.0", "owner/repo", fetch)
+    assert "403" in str(e.value)

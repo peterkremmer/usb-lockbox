@@ -290,18 +290,59 @@ ConvertTo-Json -InputObject @($n | Select-Object -Unique)
         except OSError as e:
             raise BackendError(f"Raw write failed: {e}", "RAW_WRITE")
 
+    def _diskpart(self, script: str, timeout: int = 120) -> str:
+        """Run a diskpart script (only ever built from an integer disk number and fixed words)."""
+        import tempfile
+        fd, path = tempfile.mkstemp(prefix="usblockbox_dp_", suffix=".txt")
+        try:
+            with os.fdopen(fd, "w") as f:
+                f.write(script)
+            try:
+                p = subprocess.run(["diskpart.exe", "/s", path], capture_output=True, text=True, timeout=timeout,
+                                   creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
+            except (OSError, subprocess.TimeoutExpired) as e:
+                raise BackendError(f"diskpart failed to run: {e}", "DISKPART")
+        finally:
+            try:
+                os.remove(path)
+            except OSError:
+                pass
+        if p.returncode != 0:
+            raise BackendError("diskpart failed: " + ((p.stdout or "") + (p.stderr or "")).strip()[-600:], "DISKPART")
+        return p.stdout
+
     def init_partition_format(self, drive, style, fs, label):
+        """Partition with diskpart, then format with PowerShell, stopping at the first error.
+
+        Why not Initialize-Disk + New-Partition: after a wipe, Windows reports a blank USB flash drive as
+        MBR with one whole-disk partition ("superfloppy"), so Initialize-Disk says "already initialized" and
+        New-Partition says "Not enough available capacity". diskpart's clean + convert + create partition works
+        (verified by hand on one flash drive, 2026-10-02)."""
         n = int(drive.disk_number)
+        style = str(style).upper()
+        if style not in ("GPT", "MBR"):
+            raise BackendError(f"Unsupported partition style {style!r}.", "BAD_STYLE")
         safe_label = re.sub(r"[^A-Za-z0-9_ -]", "", label)[:11]
+        self._diskpart(f"select disk {n}\nclean\nconvert {style.lower()}\ncreate partition primary\n")
+        get_part = (f"Get-Partition -DiskNumber {n} | Where-Object {{ $_.Type -ne 'Reserved' -and $_.Size -gt 1MB }} "
+                    f"| Sort-Object Size -Descending | Select-Object -First 1")
         out = run_ps(
-            f"Initialize-Disk -Number {n} -PartitionStyle {style} -Confirm:$false; "
-            f"$p=New-Partition -DiskNumber {n} -UseMaximumSize -AssignDriveLetter; "
-            f"Format-Volume -DriveLetter $p.DriveLetter -FileSystem {fs} -NewFileSystemLabel '{safe_label}' "
-            f"-Confirm:$false | Out-Null; $p.DriveLetter", timeout=300)
+            f"$ErrorActionPreference='Stop'; Update-HostStorageCache; "
+            f"$d=Get-Disk -Number {n}; "
+            f"if ($d.PartitionStyle -ne '{style}') {{ throw \"The disk is $($d.PartitionStyle), expected {style}.\" }}; "
+            f"$p=$null; for ($i=0; $i -lt 20 -and -not $p; $i++) {{ $p={get_part}; if (-not $p) {{ Start-Sleep -Milliseconds 500 }} }}; "
+            f"if (-not $p) {{ throw 'No data partition appeared on the disk.' }}; "
+            f"Format-Volume -Partition $p -FileSystem {fs} -NewFileSystemLabel '{safe_label}' -Confirm:$false | Out-Null; "
+            f"$p=Get-Partition -DiskNumber {n} -PartitionNumber $p.PartitionNumber; "
+            f"if (-not $p.DriveLetter) {{ Add-PartitionAccessPath -DiskNumber {n} -PartitionNumber $p.PartitionNumber "
+            f"-AssignDriveLetter; Start-Sleep -Seconds 1; "
+            f"$p=Get-Partition -DiskNumber {n} -PartitionNumber $p.PartitionNumber }}; "
+            f"if (-not $p.DriveLetter) {{ throw 'Windows did not assign a drive letter.' }}; [string]$p.DriveLetter",
+            timeout=300)
         letter = out.strip()[-1:]
         if not letter.isalpha():
-            raise BackendError("Could not determine the new drive letter.", "NO_LETTER")
-        return letter
+            raise BackendError(f"Could not determine the new drive letter (PowerShell said {out.strip()!r}).", "NO_LETTER")
+        return letter.upper()
 
     def enable_bitlocker(self, drive, letter, method, password, full_volume):
         used = "" if full_volume else "-UsedSpaceOnly"

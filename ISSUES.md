@@ -24,6 +24,8 @@ IDs are permanent (LB-###) so commits and chat can refer to them. Move an item t
 - [ ] **LB-012 Optional: Windows CI job that runs the GUI smoke test** (the current workflow runs the non-Qt unit tests only).
 - [ ] **LB-013 Verify Lock-BitLocker behaviour on removable volumes and USB location-path stability** (VERIFY comments in `windows.py`).
 
+- [ ] **LB-132 "Could not determine the new drive letter" on a flash drive (real hardware, 2026-10-02):** after Clear-Disk the drive reports MBR with one whole-disk partition of type FAT16, so Initialize-Disk says "already initialized" and New-Partition says "Not enough available capacity". Likely Windows treating a blank removable drive as a "superfloppy" (unconfirmed). The partition/format step also swallows PowerShell errors (only the last command's result is checked): **Changed 2026-10-02, needs a retest on the same drive:** partitioning now uses diskpart (clean, convert, create partition primary), which worked by hand on this drive, then PowerShell formats with errors set to stop and reads the drive letter back. Move to Resolved once a full run succeeds.
+
 ## Resolved
 
 ### 2026-10-02 (UI batch 2)
@@ -66,3 +68,4 @@ IDs are permanent (LB-###) so commits and chat can refer to them. Move an item t
 - [x] **LB-109 Repo files:** LICENSE (MIT), `.gitignore` (data, settings, records, caches), SECURITY.md, CHANGELOG.md, RELEASING.md, CI workflow, `requirements-dev.txt`.
 - [x] **LB-110 Settings UI review:** PIN confirmation + remove-PIN (a typo could lock you out), min/max size validation, password fields follow the selected mode, "Default" buttons for folders, wrapped notes, estimate computed from the pass count, removed read-only profile field and the dead capacity checkbox, new Updates tab.
 - [x] **LB-111 Secrets / personal-info scan** of source, docs, tests and tools: no keys, tokens, addresses or personal paths found. Only dummy simulator password in `backends/simulated.py` (labelled).
+- [x] **LB-131 Update check said "Could not reach GitHub: HTTP Error 404":** GitHub answers 404 for "latest release" when none is published. The app now says "No release has been published yet", and other HTTP errors show their status. Tests added (80 pass).

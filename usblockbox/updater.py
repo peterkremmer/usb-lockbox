@@ -46,7 +46,9 @@ Fetch = Callable[[str, int], bytes]                           # (url, max_bytes)
 
 
 class UpdateError(Exception):
-    pass
+    def __init__(self, message: str = "", status: Optional[int] = None):
+        super().__init__(message)
+        self.status = status                                  # HTTP status when GitHub answered
 
 
 @dataclass
@@ -107,6 +109,8 @@ def http_get(url: str, max_bytes: int, timeout: float = 15.0) -> bytes:
     try:
         with opener.open(req, timeout=timeout) as r:
             body = r.read(max_bytes + 1)
+    except urllib.error.HTTPError as e:                       # GitHub answered, with an error status
+        raise UpdateError(f"GitHub answered HTTP {e.code} ({e.reason}).", status=e.code)
     except (urllib.error.URLError, OSError, ValueError) as e:
         raise UpdateError(f"Could not reach GitHub: {e}")
     if len(body) > max_bytes:
@@ -137,6 +141,10 @@ def check_for_update(current: str = __version__, repo: str = UPDATE_REPO,
         raise UpdateError("Update source is not configured (UPDATE_REPO in appinfo.py).")
     try:
         rel = json.loads(fetch(f"https://api.github.com/repos/{repo}/releases/latest", MAX_API_BYTES))
+    except UpdateError as e:
+        if e.status == 404:      # GitHub's "latest release" endpoint answers 404 when none is published
+            raise UpdateError(f"No release has been published yet at github.com/{repo}, so there is nothing to update to.")
+        raise
     except ValueError:
         raise UpdateError("GitHub returned something that is not valid JSON.")
     if not isinstance(rel, dict) or rel.get("draft") or rel.get("prerelease"):
