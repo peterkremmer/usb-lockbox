@@ -4,6 +4,8 @@ All notable changes. Release notes on GitHub should repeat the matching section.
 
 ## Unreleased
 
+## 0.1.1
+
 - Renamed the project to **USB Lockbox** (package `usblockbox`).
 - Settings, records and PDFs now default to a `data/` folder next to the app instead of the home folder and
   `%APPDATA%`. Every location can still be changed in Settings; blank/"Default" means "next to the app".
