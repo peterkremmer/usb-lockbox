@@ -167,7 +167,7 @@ def write_pdf(settings: Settings, scan: ScanResult, run: RunResult, row: dict) -
         return t
 
     d = scan.drive
-    story = [Paragraph("USB Lockbox Provisioning Record", ss["Title"])]
+    story = [Paragraph("USB Lockbox Drive Record", ss["Title"])]
     b = Table([[Paragraph(f"<font color='white'><b>{run.outcome}</b></font>", ss["Heading2"])]], colWidths=[7 * inch])
     b.setStyle(TableStyle([("BACKGROUND", (0, 0), (-1, -1), banner_color)]))
     story += [b, Spacer(1, 8)]
@@ -205,7 +205,7 @@ def write_pdf(settings: Settings, scan: ScanResult, run: RunResult, row: dict) -
         "Overwrite on flash media is NIST SP 800-88 Clear, not Purge.", small)]
     SimpleDocTemplate(str(path), pagesize=letter, leftMargin=0.7 * inch, rightMargin=0.7 * inch,
                       topMargin=0.7 * inch, bottomMargin=0.7 * inch,
-                      title="USB Lockbox Provisioning Record").build(story)
+                      title="USB Lockbox Drive Record").build(story)
     return path
 
 

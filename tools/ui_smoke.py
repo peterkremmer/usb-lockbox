@@ -7,7 +7,7 @@ from PySide6.QtCore import Qt
 from PySide6.QtGui import QColor
 from PySide6.QtWidgets import QApplication
 from usblockbox import policy
-from usblockbox.backends.simulated import SimulatedBackend, STATION_PW_DEFAULT
+from usblockbox.backends.simulated import SimulatedBackend, SIM_PASSWORD_DEFAULT
 from usblockbox.config import Settings
 from usblockbox.models import SlotState
 from usblockbox.ui.controller import Controller
@@ -19,7 +19,7 @@ out.mkdir(parents=True, exist_ok=True)
 os.environ["USBLOCKBOX_HOME"] = str(out / "home")      # keeps timings.json out of the real data folder
 app = QApplication([])
 apply_tooltip_style()
-s = Settings(); s.csv_dir = str(out / "csv"); s.pdf_dir = str(out / "pdf"); s.set_fixed_password(STATION_PW_DEFAULT)
+s = Settings(); s.csv_dir = str(out / "csv"); s.pdf_dir = str(out / "pdf"); s.set_fixed_password(SIM_PASSWORD_DEFAULT)
 
 class FakeHardware(SimulatedBackend):
     """Stands in for the computer's own USB ports (3 of them) so the launch path can be checked."""
@@ -80,7 +80,7 @@ tw.setCurrentIndex(3)
 for mode, fixed_vis, glen_vis in (("generated", False, True), ("prompt", False, False), ("fixed", True, True)):
     dlg.pmode.setCurrentIndex(dlg.pmode.findData(mode)); pump(0.1)
     assert dlg.fixed_field.isVisibleTo(dlg) == fixed_vis and dlg.glen.isVisibleTo(dlg) == glen_vis, mode
-assert dlg.fixed.text() == STATION_PW_DEFAULT                     # the fixed password is shown
+assert dlg.fixed.text() == SIM_PASSWORD_DEFAULT                     # the fixed password is shown
 assert "XTS-AES-256" in dlg.method.itemText(0) and dlg.method.itemText(2) == "AES-CBC-256"
 dlg.dry.setChecked(True)
 assert "operator" not in " ".join(tw.tabText(i).lower() for i in range(tw.count()))

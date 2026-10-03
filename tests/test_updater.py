@@ -19,7 +19,7 @@ def make_zip(files, wrapper="usblockbox-1.2.0/"):
     return buf.getvalue()
 
 
-GOOD_FILES = {"run_station.py": "print('new')", "usblockbox/__init__.py": "__version__='1.2.0'",
+GOOD_FILES = {"run_usblockbox.py": "print('new')", "usblockbox/__init__.py": "__version__='1.2.0'", "usblockbox/__main__.py": "y=2",
               "usblockbox/core.py": "x=1", "data/settings.json": "{\"hostile\": true}"}
 
 
@@ -124,7 +124,7 @@ def test_apply_update_replaces_code_keeps_data_and_backs_up(tmp_path):
     (tmp_path / "data" / "settings.json").write_text("mine")
     written = updater.apply_update(make_zip(GOOD_FILES), tmp_path, "1.0.0")
     assert (tmp_path / "usblockbox" / "core.py").read_text() == "x=1"
-    assert (tmp_path / "run_station.py").exists()
+    assert (tmp_path / "run_usblockbox.py").exists()
     assert (tmp_path / "data" / "settings.json").read_text() == "mine"          # data/ is never overwritten
     assert "data/settings.json" not in written
     backups = list((tmp_path / ".update_backup").rglob("core.py"))
@@ -136,7 +136,7 @@ def test_apply_update_replaces_code_keeps_data_and_backs_up(tmp_path):
 def test_zip_slip_rejected(tmp_path, evil):
     buf = io.BytesIO()
     with zipfile.ZipFile(buf, "w") as z:
-        z.writestr("run_station.py", "x"); z.writestr("usblockbox/__init__.py", "x"); z.writestr(evil, "boom")
+        z.writestr("run_usblockbox.py", "x"); z.writestr("usblockbox/__init__.py", "x"); z.writestr(evil, "boom")
     with pytest.raises(UpdateError):
         updater.apply_update(buf.getvalue(), tmp_path)
     assert not (tmp_path.parent / "evil.py").exists()
@@ -145,7 +145,7 @@ def test_zip_slip_rejected(tmp_path, evil):
 def test_symlink_rejected(tmp_path):
     buf = io.BytesIO()
     with zipfile.ZipFile(buf, "w") as z:
-        z.writestr("run_station.py", "x"); z.writestr("usblockbox/__init__.py", "x")
+        z.writestr("run_usblockbox.py", "x"); z.writestr("usblockbox/__init__.py", "x")
         info = zipfile.ZipInfo("link"); info.external_attr = (0o120777 << 16)
         z.writestr(info, "/etc/passwd")
     with pytest.raises(UpdateError, match="Symbolic link"):
@@ -163,7 +163,7 @@ def test_git_checkout_is_never_modified(tmp_path):
     (tmp_path / ".git").mkdir()
     with pytest.raises(UpdateError, match="git"):
         updater.apply_update(make_zip(GOOD_FILES), tmp_path)
-    assert not (tmp_path / "run_station.py").exists()
+    assert not (tmp_path / "run_usblockbox.py").exists()
 
 
 def test_no_release_yet_is_explained_not_called_unreachable():
@@ -180,3 +180,11 @@ def test_other_http_errors_are_passed_through():
     with pytest.raises(UpdateError) as e:
         updater.check_for_update("0.1.0", "owner/repo", fetch)
     assert "403" in str(e.value)
+
+
+def test_archive_without_the_app_package_is_refused(tmp_path):
+    z = io.BytesIO()
+    with zipfile.ZipFile(z, "w") as zf:
+        zf.writestr("usblockbox-9.9.9/readme.txt", "not the app")
+    with pytest.raises(UpdateError):
+        updater.apply_update(z.getvalue(), tmp_path, "0.1.0")

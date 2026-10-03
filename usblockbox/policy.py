@@ -61,13 +61,13 @@ def evaluate(raw: dict[str, dict], settings: Settings,
 
     if not gpo and not mdm:
         rep.items.append(PolicyItem("BitLocker policy", "none found", "derived", "ok",
-                                    "No GPO or Intune BitLocker settings detected on this station."))
+                                    "No GPO or Intune BitLocker settings detected on this computer."))
 
     # 1) BitLocker on removable drives disabled
     if gpo.get(GPO_REMOVABLE_CONFIGURE) == 0:
         rep.items.append(PolicyItem(GPO_REMOVABLE_CONFIGURE, "0", "GPO", "block",
                                     "Group Policy disables BitLocker on removable drives. "
-                                    "This station cannot encrypt drives until the policy is scoped out."))
+                                    "This computer cannot encrypt drives until the policy is scoped out."))
 
     # 2) Encryption method forced by policy
     if GPO_REMOVABLE_METHOD in gpo:

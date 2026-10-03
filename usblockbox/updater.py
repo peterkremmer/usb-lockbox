@@ -203,7 +203,7 @@ def _safe_members(zf: zipfile.ZipFile) -> list[tuple[zipfile.ZipInfo, PurePosixP
     strip = len(tops) == 1 and all(len(p.parts) > 1 for p in paths)       # GitHub-style single wrapper folder
     out = [(i, PurePosixPath(*p.parts[1:]) if strip else p) for i, p in zip(infos, paths)]
     names = {str(p) for _, p in out}
-    if f"{APP_SLUG}/__init__.py" not in names or "run_station.py" not in names:
+    if f"{APP_SLUG}/__init__.py" not in names or f"{APP_SLUG}/__main__.py" not in names:
         raise UpdateError("Update archive does not look like this application.")
     return out
 

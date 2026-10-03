@@ -113,10 +113,10 @@ class WindowsBackend(Backend):
     name = "windows"
     real = True
 
-    def __init__(self, station_password_getter=None, elevated: bool = True):
+    def __init__(self, password_getter=None, elevated: bool = True):
         if sys.platform != "win32":
             raise BackendError("The Windows backend only runs on Windows.", "PLATFORM")
-        self._pw = station_password_getter or (lambda: "")
+        self._pw = password_getter or (lambda: "")
         self.elevated = elevated
         self._scanner = usbports.PortScanner(run_ps)
         self.ports_note = ""
@@ -187,11 +187,11 @@ ConvertTo-Json -InputObject @($n | Select-Object -Unique)
                                             _as_list(info.get("Protectors")), False)
                 if not d.bitlocker.locked:
                     pw = self._pw()
-                    d.bitlocker.unlocked_with_station_password = bool(pw) and self.verify_station_password(d, pw)
+                    d.bitlocker.unlocked_with_fixed_password = bool(pw) and self.verify_password(d, pw)
                 else:
                     pw = self._pw()
-                    if pw and self.verify_station_password(d, pw):
-                        d.bitlocker.unlocked_with_station_password = True
+                    if pw and self.verify_password(d, pw):
+                        d.bitlocker.unlocked_with_fixed_password = True
                         d.bitlocker.locked = False
             if not (d.bitlocker.present and d.bitlocker.locked):
                 v.file_count, v.file_detail = self._count_files(v.drive_letter)
@@ -226,7 +226,7 @@ ConvertTo-Json -InputObject @($n | Select-Object -Unique)
             return None, ""
         return n, describe_counts(top, per, hidden, mac_meta)
 
-    def verify_station_password(self, drive: DriveInfo, password: str) -> bool:
+    def verify_password(self, drive: DriveInfo, password: str) -> bool:
         """Non-destructive: lock then unlock with the password (VERIFY that Lock on an unlocked
         removable volume is acceptable in your environment)."""
         for v in drive.volumes:
@@ -443,7 +443,7 @@ ConvertTo-Json -InputObject @($n | Select-Object -Unique)
         types = _as_list(info.get("Protectors"))
         if "Password" not in types or "RecoveryPassword" not in types:
             raise BackendError(f"Verification failed: protectors are {types}.", "VERIFY")
-        if not self.verify_station_password(DriveInfo(drive.disk_number, drive.unique_id, drive.serial,
+        if not self.verify_password(DriveInfo(drive.disk_number, drive.unique_id, drive.serial,
                                                       volumes=[VolumeInfo(drive_letter=letter)]), password):
             raise BackendError("Verification failed: password did not unlock the drive.", "VERIFY")
 

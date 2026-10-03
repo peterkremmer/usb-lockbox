@@ -12,7 +12,7 @@ RESERVED_MAX = 32 * 1024 * 1024   # Microsoft Reserved partition size tolerated 
 
 
 def _history_ok(history: list[dict]) -> bool:
-    """True if records show this serial was successfully provisioned by this station."""
+    """True if records show this serial was successfully provisioned by this app."""
     return any(r.get("outcome") == "PROCESSED" for r in history)
 
 
@@ -50,9 +50,9 @@ def scan_drive(drive: DriveInfo, settings: Settings, system_disks: set[int],
     enc_ok = False
     if not bl.present:
         add(Finding("NOT_ENCRYPTED", Severity.NEEDS_WORK, "No BitLocker encryption on this drive."))
-    elif bl.locked and not bl.unlocked_with_station_password:
+    elif bl.locked and not bl.unlocked_with_fixed_password:
         add(Finding("ENC_LOCKED", Severity.NEEDS_WORK,
-                    "Encrypted but locked and the station password does not open it. Contents unknown; will be wiped."))
+                    "Encrypted but locked and the fixed password does not open it. Contents unknown; will be wiped."))
     else:
         problems = []
         if bl.method != target:
@@ -61,13 +61,13 @@ def scan_drive(drive: DriveInfo, settings: Settings, system_disks: set[int],
             problems.append(f"only {bl.percent_encrypted:.0f}% encrypted")
         if not bl.protection_on:
             problems.append("protection is off")
-        if not bl.unlocked_with_station_password:
-            problems.append("station password was not verified")
+        if not bl.unlocked_with_fixed_password:
+            problems.append("fixed password was not verified")
         if problems:
             add(Finding("ENC_WRONG", Severity.NEEDS_WORK, "Encryption not to standard: " + "; ".join(problems) + "."))
         else:
             enc_ok = True
-            add(Finding("ENC_OK", Severity.INFO, f"Encrypted with {method_label(target)}, fully encrypted, station password opens it."))
+            add(Finding("ENC_OK", Severity.INFO, f"Encrypted with {method_label(target)}, fully encrypted, the fixed password opens it."))
 
     # ---- 4. content
     files = drive.total_files

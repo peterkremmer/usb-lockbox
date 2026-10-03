@@ -64,7 +64,7 @@ DEFAULT_COLORS = {
 }
 
 
-APP_ROOT = Path(__file__).resolve().parent.parent      # the folder that holds run_station.py
+APP_ROOT = Path(__file__).resolve().parent.parent      # the folder that holds run_usblockbox.py
 _DATA_DIR: Path | None = None
 DATA_DIR_FALLBACK = False                               # True if the app folder was not writable
 
@@ -169,7 +169,7 @@ class Settings:
     operator: str = ""                      # optional override; by default the signed-in Windows user is used
     schema_version: int = 2                 # older files (before 2) are started in dry-run once
 
-    # Station
+    # Ports and the simulator
     hidden_ports: list = field(default_factory=list)   # port keys the operator chose not to show (Settings > Ports)
     port_names: dict = field(default_factory=dict)     # port key -> the operator's label
     simulator_ports: int = 4                # number of virtual ports in Simulator mode (real ports are detected)

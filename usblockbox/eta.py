@@ -40,6 +40,10 @@ def fmt_duration(seconds: float) -> str:
     return f"{h} h {m:02d} min" if m else f"{h} h"
 
 
+def fmt_ago(seconds: float) -> str:
+    return "just now" if seconds < 60 else fmt_duration(seconds) + " ago"
+
+
 def fmt_clock(ts: float) -> str:
     return time.strftime("%H:%M", time.localtime(ts))
 

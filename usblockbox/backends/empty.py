@@ -19,7 +19,7 @@ class NoHardwareBackend(Backend):
     def system_disk_numbers(self) -> set[int]:
         return set()
 
-    def verify_station_password(self, drive, password) -> bool:
+    def verify_password(self, drive, password) -> bool:
         return False
 
     def _no(self, *a, **k):

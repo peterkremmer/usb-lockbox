@@ -15,7 +15,7 @@ def scan(backend, settings, scenario, port=1, pol=None, hist=None):
     d = backend.add_scenario(scenario, port)
     pw = settings.get_fixed_password()
     # mimic what a real backend does: verify the password on already-encrypted drives
-    if d.bitlocker.present and backend.verify_station_password(d, pw):
+    if d.bitlocker.present and backend.verify_password(d, pw):
         pass
     return scan_drive(backend.get_drive(d.disk_number), settings, backend.system_disk_numbers(),
                       pol, {f"sim-port-{i}" for i in range(1, 17)}, hist or [])
@@ -108,14 +108,14 @@ def test_locked_unknown_is_wiped(backend, settings):
 
 def test_compliant_empty_is_refreshed_by_default(backend, settings):
     d = backend.add_scenario("compliant_empty", 1)
-    d.bitlocker.unlocked_with_station_password = True
+    d.bitlocker.unlocked_with_fixed_password = True
     r = scan_drive(d, settings, set(), None, None, [{"outcome": "PROCESSED"}])
     assert r.verdict == Verdict.NEEDS_WORK and any(f.code == "REFRESH" for f in r.findings)
 
 
 def test_compliant_empty_skipped_only_with_opt_in_and_history(backend, settings):
     d = backend.add_scenario("compliant_empty", 1)
-    d.bitlocker.unlocked_with_station_password = True
+    d.bitlocker.unlocked_with_fixed_password = True
     settings.reuse_compliant_drives = True
     assert scan_drive(d, settings, set(), None, None, []).verdict == Verdict.NEEDS_WORK     # no history
     assert scan_drive(d, settings, set(), None, None, [{"outcome": "PROCESSED"}]).verdict == Verdict.ALREADY_OK

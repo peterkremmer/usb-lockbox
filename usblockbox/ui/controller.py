@@ -435,7 +435,7 @@ class Controller(QObject):
                          f"{eta.fmt_clock(now + slot.remaining)}" + ("" if slot.remaining_measured else " (rough guess)"))
             slot.timing_text = line1 + "\n" + line2
         elif slot.finished_at and slot.state in (SlotState.DONE, SlotState.FAILED, SlotState.ALREADY_OK):
-            slot.timing_text = (f"Finished {eta.fmt_clock(slot.finished_at)} · {eta.fmt_duration(now - slot.finished_at)} ago"
+            slot.timing_text = (f"Finished {eta.fmt_clock(slot.finished_at)} · {eta.fmt_ago(now - slot.finished_at)}"
                                 f" · took {eta.fmt_duration(slot.finished_at - slot.started_at)}")
         else:
             slot.timing_text = ""
@@ -475,7 +475,7 @@ class Controller(QObject):
             return "   ·   ".join(parts), "working"
         if self._batch_finished_at and any(s.state != SlotState.EMPTY for s in self.slots):
             parts = [f"Batch finished {eta.fmt_clock(self._batch_finished_at)} "
-                     f"({eta.fmt_duration(now - self._batch_finished_at)} ago)",
+                     f"({eta.fmt_ago(now - self._batch_finished_at)})",
                      f"took {eta.fmt_duration(self._batch_finished_at - self._batch_started)}",
                      f"{self._batch_done} done" + (f", {self._batch_failed} FAILED: set those aside" if self._batch_failed else "")]
             return "   ·   ".join(parts), ("attention" if self._batch_failed else "finished")

@@ -71,3 +71,7 @@ def test_attention_flags_a_drive_much_slower_than_usual():
 def test_attention_flags_overdue_only_against_a_known_expectation():
     assert "longer than expected" in _att(started_at=10_000 - 3 * 3600, expected_total=3600.0)
     assert _att(started_at=10_000 - 3 * 3600, expected_total=None) == ""
+
+
+def test_fmt_ago():
+    assert eta.fmt_ago(5) == "just now" and eta.fmt_ago(125) == "2 min ago" and eta.fmt_ago(7200) == "2 h ago"

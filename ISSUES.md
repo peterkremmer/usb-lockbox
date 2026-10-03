@@ -9,8 +9,7 @@ IDs are permanent (LB-###) so commits and chat can refer to them. Move an item t
 - [ ] **LB-126 Verify the FIPS-policy registry check** (`config.fips_mode_enabled`, HKLM\\SYSTEM\\CurrentControlSet\\Control\\Lsa\\FipsAlgorithmPolicy) and that recovery-password creation really fails on a FIPS-policy PC; decide whether to refuse early instead of warning. Source: Microsoft KB "BitLocker recovery password not FIPS compliant".
 - [ ] **LB-127 Decide: drives that hold only system junk** (FOUND.nnn, Spotlight, Recycle Bin) could count as "no user files". Currently still counted and warned.
 - [ ] **LB-016 Test USB port discovery on real hardware** (HP Omen, with and without a hub): run `py -m usblockbox --ports-dump`, compare with the tiles. The SetupAPI/IOCTL code, companion-port merging and location-path matching are unit-tested only on synthetic data. Also verify the UAC relaunch.
-- [ ] **LB-002 Publish:** `UPDATE_REPO` is set to `peterkremmer/usb-lockbox`; create that repo on GitHub, push, then publish v0.1.0 following RELEASING.md and check Settings > Updates > Check now against it (LB-008).
-- [ ] **LB-003 Real-hardware testing of the Windows backend** (README "Before real mode"). Nothing destructive has run on real disks yet.
+- [ ] **LB-003 Real-hardware testing of the Windows backend** (partitioning was fixed in 0.1.1 after the first real runs; a full run is still to be confirmed).
 
 ## Open
 
@@ -18,7 +17,7 @@ IDs are permanent (LB-###) so commits and chat can refer to them. Move an item t
 - [ ] **LB-005 Verify DPAPI user scope** on Windows, including when the elevated process runs as a different account than the one that saved the password (the app then asks you to re-enter it).
 - [ ] **LB-006 Capacity (counterfeit-drive) test is not implemented.** `capacity_mismatch` exists in the model and safety check, but nothing sets it. UI checkbox removed until it exists.
 - [ ] **LB-007 Keyed or signed CSV log** if real tamper-resistance is wanted (today: unkeyed hash chain, accidental edits only).
-- [ ] **LB-008 Verify the update flow against a real GitHub release** (checked here only with mocked responses and zip fixtures).
+- [ ] **LB-008 Verify the self-update flow against a real GitHub release.** The release workflow works (v0.1.1); still to do: update an unzipped older copy via Settings > Updates and confirm the files are replaced.
 - [ ] **LB-010 Per-organisation password profiles** (`password_profile_id` is reserved, not implemented).
 - [ ] **LB-011 Remove stale `__pycache__` folders** from the working copy (ignored by git, but they contain paths from the old machine; delete before zipping or sharing the folder by any other means).
 - [ ] **LB-012 Optional: Windows CI job that runs the GUI smoke test** (the current workflow runs the non-Qt unit tests only).
@@ -31,6 +30,12 @@ IDs are permanent (LB-###) so commits and chat can refer to them. Move an item t
 - [ ] **LB-135 Shell Hardware Detection pause (added 2026-10-02):** needs a real run. If the app is killed mid-run the service stays stopped until reboot or `Start-Service ShellHWDetection`.
 
 ## Resolved
+
+### 2026-10-03
+
+- [x] **LB-136 Old-name leftovers removed:** `run_station.*` renamed to `run_usblockbox.*`, "station password" is now "fixed password" (code and messages), "this station" is "this computer", PDF title is "USB Lockbox Drive Record". The self-update check no longer requires a launcher file by name (it checks for the `usblockbox` package), so a future rename cannot break updates. 0.1.0 and 0.1.1 still look for `run_station.py`, so they need a manual download for the next release.
+- [x] **LB-137 Docs refresh:** README rewritten (current screenshots, install from the release zip, walk-away batches, troubleshooting), CHANGELOG cut down to what changed per release, "Before you turn dry-run off" checklist replaced by a short first-run note.
+- [x] **LB-002 Published:** repo and v0.1.0 / v0.1.1 releases are live; the release workflow builds the zip and SHA256SUMS from a pushed tag.
 
 ### 2026-10-02 (UI batch 2)
 

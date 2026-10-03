@@ -57,7 +57,7 @@ class BitLockerInfo:
     percent_encrypted: float = 0.0
     locked: bool = False
     protector_types: list[str] = field(default_factory=list)
-    unlocked_with_station_password: bool = False
+    unlocked_with_fixed_password: bool = False
 
 
 @dataclass

@@ -11,7 +11,7 @@ from ..models import BitLockerInfo, DriveInfo, PartitionInfo, Port, VolumeInfo
 from .base import Backend, BackendError, Cancelled, CancelCheck, Progress
 
 GB = 1_000_000_000
-STATION_PW_DEFAULT = "Sim-Station-Pass-2026"   # dummy value for the simulator and tests only
+SIM_PASSWORD_DEFAULT = "Sim-Pass-2026-Demo"   # dummy value for the simulator and tests only
 
 SCENARIOS = [
     "blank", "used_files", "compliant_empty", "wrong_method", "odd_boot",
@@ -33,10 +33,10 @@ class SimulatedBackend(Backend):
     name = "simulated"
     real = False
 
-    def __init__(self, speed: float = 1.0, station_password: str = STATION_PW_DEFAULT, port_count: int = 4):
+    def __init__(self, speed: float = 1.0, sim_password: str = SIM_PASSWORD_DEFAULT, port_count: int = 4):
         self.port_count = port_count
         self.speed = speed                  # >1 is faster. Tests use a large value.
-        self.station_password = station_password
+        self.sim_password = sim_password
         self._lock = threading.RLock()
         self._disks: dict[int, DriveInfo] = {}
         self._passwords: dict[str, str] = {}      # serial -> password protecting the drive
@@ -64,11 +64,11 @@ class SimulatedBackend(Backend):
             elif scenario == "compliant_empty":
                 d.partition_style = "GPT"; d.partitions = [basic]; d.volumes = [vol(0)]
                 d.bitlocker = BitLockerInfo(True, True, "XtsAes256", 100.0, False, ["Password", "RecoveryPassword"], True)
-                self._passwords[serial] = self.station_password
+                self._passwords[serial] = self.sim_password
             elif scenario == "wrong_method":
                 d.partition_style = "GPT"; d.partitions = [basic]; d.volumes = [vol(5)]
                 d.bitlocker = BitLockerInfo(True, True, "XtsAes128", 100.0, False, ["Password"], True)
-                self._passwords[serial] = self.station_password
+                self._passwords[serial] = self.sim_password
             elif scenario == "odd_boot":
                 d.partition_style = "MBR"; d.mbr_boot_code_present = True
                 d.partitions = [PartitionInfo(1, "Linux", 8 * GB, True), PartitionInfo(2, "EFI System", 100_000_000),
@@ -134,7 +134,7 @@ class SimulatedBackend(Backend):
     def system_disk_numbers(self) -> set[int]:
         return set(self.system_disks)
 
-    def verify_station_password(self, drive: DriveInfo, password: str) -> bool:
+    def verify_password(self, drive: DriveInfo, password: str) -> bool:
         with self._lock:
             d = self._disks.get(drive.disk_number)
             return bool(d and self._passwords.get(d.serial) == password)

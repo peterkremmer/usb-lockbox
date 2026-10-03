@@ -282,7 +282,7 @@ class SettingsDialog(QDialog):
         self.rec_warn = _note("", warn=True)
         f.addRow(self.rec_warn)
         f.addRow(_note("Defaults live in the 'data' folder next to the app. Move the folders anywhere you like, "
-                       "but keep them on a restricted, backed-up location and never on a drive this station wipes."))
+                       "but keep them on a restricted, backed-up location and never on a drive this app wipes."))
         if DATA_DIR_FALLBACK:
             f.addRow(_note("The app folder is not writable, so the per-user profile folder is used for data.", warn=True))
         self.sec_csv.toggled.connect(self._sync_record_warning); self.sec_pdf.toggled.connect(self._sync_record_warning)

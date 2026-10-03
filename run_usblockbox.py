@@ -1,4 +1,4 @@
-"""Double-click launcher. Real mode re-launches itself elevated (UAC prompt); simulation does not need admin."""
+"""Launcher for USB Lockbox (same as `py -m usblockbox`). On Windows it re-launches itself elevated (UAC prompt)."""
 import sys
 from pathlib import Path
 
