@@ -1,3 +1,5 @@
+![USB Lockbox](docs/images/banner.png)
+
 # USB Lockbox
 
 Scan, wipe and BitLocker-encrypt USB drives on a Windows 11 (Pro/Enterprise) workstation, with a big status tile per hub port and an audit trail: one CSV row and one PDF per drive. No database. Python + PySide6.
@@ -5,6 +7,20 @@ Scan, wipe and BitLocker-encrypt USB drives on a Windows 11 (Pro/Enterprise) wor
 > **Status: v0.1, early.** The simulator is tested (unit tests + a headless GUI smoke test). **The Windows backend, including USB port detection, has NOT been tested on real hardware.** The app starts in **dry-run** and cannot erase a drive until you turn that off. Once you turn dry-run off the app **permanently erases the drives you process**. Use sacrificial drives on a spare machine first. No warranty (see [LICENSE](LICENSE)).
 
 Running list of planned work and fixed issues: [ISSUES.md](ISSUES.md). Security notes: [SECURITY.md](SECURITY.md).
+
+## What it looks like
+
+![How it works](docs/images/how-it-works.png)
+
+![Main window in dry-run](docs/images/screenshot-main.png)
+
+*Main window in dry-run, one tile per USB port. Screenshots use the built-in simulator with virtual drives.*
+
+| Settings > Ports | Settings > Encryption |
+|---|---|
+| ![Ports](docs/images/screenshot-settings-ports.png) | ![Encryption](docs/images/screenshot-settings-encryption.png) |
+
+![Simulator mode](docs/images/screenshot-simulator.png)
 
 ## Run
 
