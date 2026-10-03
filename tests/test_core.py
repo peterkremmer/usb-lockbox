@@ -265,26 +265,70 @@ def test_missing_fixed_password_fails_before_any_write(backend, settings):
     assert not run.ok and backend.log == []
 
 
-def test_windows_partition_step_uses_diskpart_and_reports_real_errors(monkeypatch):
+def _win_backend(monkeypatch, ps_log, dp_log, ps_reply="\r\nE\r\n"):
+    import contextlib
     from usblockbox.backends import windows as w
+    be = w.WindowsBackend.__new__(w.WindowsBackend)
+    monkeypatch.setattr(w.WindowsBackend, "_diskpart", lambda self, s, timeout=120: dp_log.append(s) or "")
+    monkeypatch.setattr(w.WindowsBackend, "_shell_hw_paused", lambda self: contextlib.nullcontext())
+    monkeypatch.setattr(w, "run_ps", lambda script, env=None, timeout=120: ps_log.append(script) or ps_reply)
+    return w, be
+
+
+def test_windows_partition_step_formats_before_it_assigns_a_letter(monkeypatch):
     from usblockbox.backends.base import BackendError
     from usblockbox.models import DriveInfo
-    be = w.WindowsBackend.__new__(w.WindowsBackend)
-    seen = {}
-    monkeypatch.setattr(w.WindowsBackend, "_diskpart", lambda self, s, timeout=120: seen.setdefault("dp", s))
-    monkeypatch.setattr(w, "run_ps", lambda script, env=None, timeout=120: seen.setdefault("ps", script) and "\r\nE\r\n")
+    ps, dp = [], []
+    w, be = _win_backend(monkeypatch, ps, dp)
     d = DriveInfo(2, "uid", "ser")
     assert be.init_partition_format(d, "gpt", "exFAT", "Secure USB!") == "E"
-    assert "select disk 2" in seen["dp"] and "clean" in seen["dp"] and "convert gpt" in seen["dp"]
-    assert "create partition primary" in seen["dp"]
-    assert "ErrorActionPreference='Stop'" in seen["ps"] and "Format-Volume -Partition" in seen["ps"]
-    assert "'Secure USB'" in seen["ps"]                       # label sanitised
+    assert "select disk 2" in dp[0] and "clean" in dp[0] and "convert gpt" in dp[0]
+    script = ps[0]
+    assert "ErrorActionPreference='Stop'" in script and "'Secure USB'" in script       # label sanitised
+    assert "New-Partition -DiskNumber 2 -UseMaximumSize;" in script and "-AssignDriveLetter;" in script
+    assert script.index("Format-Volume -Partition") < script.index("Add-PartitionAccessPath")   # letter comes last
+    assert "New-Partition -DiskNumber 2 -UseMaximumSize -AssignDriveLetter" not in script
     with pytest.raises(BackendError):
         be.init_partition_format(d, "weird", "exFAT", "X")
+
+
+def test_windows_partition_step_reports_diskpart_failure(monkeypatch):
+    from usblockbox.backends.base import BackendError
+    from usblockbox.models import DriveInfo
+    ps, dp = [], []
+    w, be = _win_backend(monkeypatch, ps, dp)
 
     def fail(self, s, timeout=120):
         raise BackendError("diskpart failed: not convertible", "DISKPART")
     monkeypatch.setattr(w.WindowsBackend, "_diskpart", fail)
     with pytest.raises(BackendError) as e:
-        be.init_partition_format(d, "GPT", "exFAT", "X")
-    assert "not convertible" in str(e.value)
+        be.init_partition_format(DriveInfo(2, "uid", "ser"), "GPT", "exFAT", "X")
+    assert "not convertible" in str(e.value) and not ps
+
+
+def test_shell_hardware_detection_is_paused_once_and_always_restarted(monkeypatch):
+    from usblockbox.backends import windows as w
+    calls = []
+
+    def fake_ps(script, env=None, timeout=120):
+        calls.append("stop" if "Stop-Service" in script else "start" if "Start-Service" in script else "other")
+        return "stopped" if "Stop-Service" in script else ""
+    monkeypatch.setattr(w, "run_ps", fake_ps)
+    monkeypatch.setattr(w.atexit, "register", lambda *a, **k: None)
+    w.WindowsBackend._hw_users, w.WindowsBackend._hw_stopped = 0, False
+    a = w.WindowsBackend.__new__(w.WindowsBackend)
+    with a._shell_hw_paused():
+        with a._shell_hw_paused():                       # a second drive processing at the same time
+            pass
+        assert calls == ["stop"]                         # not paused twice, not restarted while one is still busy
+    assert calls == ["stop", "start"]
+    with pytest.raises(RuntimeError):                    # a failure inside still restarts it
+        with a._shell_hw_paused():
+            raise RuntimeError("boom")
+    assert calls == ["stop", "start", "stop", "start"]
+    # service not running to begin with: it is left alone
+    calls.clear()
+    monkeypatch.setattr(w, "run_ps", lambda s, env=None, timeout=120: calls.append(s) or "skip")
+    with a._shell_hw_paused():
+        pass
+    assert len(calls) == 1 and "Start-Service" not in calls[0]

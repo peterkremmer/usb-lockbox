@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import dataclasses
 import threading
+import time
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Optional
@@ -11,10 +12,11 @@ from PySide6.QtCore import QObject, QTimer, Signal
 
 from ..backends.base import Backend
 from ..models import (DriveInfo, PolicyReport, Port, RunResult, ScanResult, SlotState, Verdict)
-from ..pipeline import Processor
+from ..pipeline import Processor, plan_steps
 from .. import policy as policy_mod
 from .. import records
-from ..config import Settings
+from .. import eta
+from ..config import Settings, settings_dir
 from ..safety import protected_paths
 
 
@@ -33,6 +35,21 @@ class Slot:
     processor: Optional[Processor] = None
     pdf_path: str = ""
     scanning_serial: str = ""
+    # timing (set while processing, kept after it ends so a returning operator can see when it finished)
+    plan: list = field(default_factory=list)
+    size_gb: float = 0.0
+    passes: int = 0
+    started_at: float = 0.0
+    finished_at: float = 0.0
+    step_started: float = 0.0
+    step_label_seen: str = ""
+    last_progress_at: float = 0.0
+    last_frac: float = 0.0
+    expected_total: Optional[float] = None
+    remaining: Optional[float] = None
+    remaining_measured: bool = False
+    attention: str = ""
+    timing_text: str = ""
 
     @property
     def title(self) -> str:
@@ -53,6 +70,9 @@ class Controller(QObject):
     _scanned = Signal(int, object, object)
     _progress = Signal(int, str, float)
     _finished = Signal(int, object, object, object, object)
+    batch_changed = Signal()          # the batch summary text may have changed
+    batch_finished = Signal()         # nothing is processing any more after a batch
+    attention_raised = Signal(int)    # a working drive looks stuck, slow or overdue
 
     def __init__(self, backend: Backend, settings: Settings, simulator: bool = False, parent=None):
         super().__init__(parent)
@@ -72,6 +92,16 @@ class Controller(QObject):
         self._finished.connect(self._on_finished)
         self.timer = QTimer(self)
         self.timer.timeout.connect(self.poll)
+        self._now = time.time
+        self._timings_real = eta.Timings(settings_dir() / "timings.json")
+        self._timings_sim = eta.Timings(None)       # the simulator's made-up speeds never pollute the real ones
+        self._batch_started = 0.0
+        self._batch_finished_at = 0.0
+        self._batch_done = 0
+        self._batch_failed = 0
+        self.tick_timer = QTimer(self)
+        self.tick_timer.timeout.connect(self.tick)
+        self.tick_timer.start(5000)
 
     # ------------------------------------------------------------ lifecycle
     def _interval(self) -> int:
@@ -83,6 +113,10 @@ class Controller(QObject):
 
     def stop(self) -> None:
         self.timer.stop()
+
+    @property
+    def timings(self) -> eta.Timings:
+        return self._timings_sim if self.simulator else self._timings_real
 
     def busy(self) -> bool:
         return any(s.state == SlotState.PROCESSING for s in self.slots)
@@ -250,6 +284,9 @@ class Controller(QObject):
         slot.drive = slot.scan = slot.run = None
         slot.message = ""; slot.fraction = 0.0; slot.step_label = ""; slot.warnings = []
         slot.pdf_path = ""
+        slot.finished_at = slot.started_at = 0.0
+        slot.attention = slot.timing_text = ""
+        slot.remaining = None
         self.slot_changed.emit(slot.index)
 
     # ------------------------------------------------------------ scanning
@@ -296,8 +333,21 @@ class Controller(QObject):
         s = self.effective_settings()
         proc = Processor(self.backend, s, self.bound_locations(), self._extra_protected())
         slot.processor = proc
+        now = self._now()
+        if not self.busy():                                   # first drive of a new batch
+            self._batch_started, self._batch_finished_at = now, 0.0
+            self._batch_done = self._batch_failed = 0
+        slot.plan = plan_steps(s)
+        slot.size_gb = (slot.scan.drive.size_bytes or 0) / eta.GB
+        slot.passes = s.overwrite_passes
+        slot.started_at, slot.finished_at = now, 0.0
+        slot.step_started = slot.last_progress_at = now
+        slot.step_label_seen, slot.last_frac, slot.attention = "", 0.0, ""
+        rem = eta.remaining(slot.plan, slot.plan[0], 0.0, 0.0, slot.size_gb, slot.passes, self.timings)
+        slot.expected_total = rem[0] if rem and rem[1] else None     # only judge "overdue" against measured numbers
         slot.state = SlotState.PROCESSING
         slot.fraction = 0.0; slot.step_label = "Starting"; slot.message = "Working - do not remove."
+        self._update_timing(slot, now)
         self.slot_changed.emit(idx)
         scan, pol, backend = slot.scan, self.last_policy, self.backend
 
@@ -334,13 +384,111 @@ class Controller(QObject):
         if idx >= len(self.slots):
             return
         slot = self.slots[idx]
+        now = self._now()
+        if label != slot.step_label_seen:                     # a new step began: learn how long the last one took
+            self._learn(slot, slot.step_label_seen, now)
+            slot.step_label_seen, slot.step_started, slot.last_progress_at = label, now, now
+        if frac > slot.last_frac + 0.0005:
+            slot.last_progress_at = now
+        slot.last_frac = max(slot.last_frac, frac)
         slot.step_label, slot.fraction = label, frac
+        self._update_timing(slot, now)
         self.slot_changed.emit(idx)
+
+    def _step_frac(self, slot: Slot) -> float:
+        if slot.step_label not in slot.plan or not slot.plan:
+            return 0.0
+        n = len(slot.plan)
+        return min(max(slot.fraction * n - slot.plan.index(slot.step_label), 0.0), 1.0)
+
+    def _learn(self, slot: Slot, label: str, now: float) -> None:
+        """A step just finished: remember its duration (per GB for the long ones) for future estimates."""
+        if not label or label not in slot.plan or self.settings.dry_run and not self.simulator:
+            return
+        key, took = eta.step_key(label), now - slot.step_started
+        if key in eta.LONG_STEPS:
+            if slot.size_gb <= 0:
+                return
+            took = took / slot.size_gb / (max(slot.passes, 1) if key == "overwrite" else 1)
+        self.timings.record(key, took)
+
+    def _update_timing(self, slot: Slot, now: float) -> None:
+        """Refresh the time-left text and the 'needs a look' flag for one slot."""
+        if slot.state == SlotState.PROCESSING:
+            f = self._step_frac(slot)
+            elapsed_step = now - slot.step_started
+            rem = eta.remaining(slot.plan, slot.step_label, f, elapsed_step, slot.size_gb, slot.passes, self.timings)
+            slot.remaining, slot.remaining_measured = (rem if rem else (None, False))
+            old = slot.attention
+            slot.attention = eta.attention(
+                now=now, last_progress_at=slot.last_progress_at, stall_seconds=self.settings.stall_minutes * 60,
+                key=eta.step_key(slot.step_label), size_gb=slot.size_gb, passes=slot.passes, step_frac=f,
+                step_elapsed=elapsed_step, started_at=slot.started_at, expected_total=slot.expected_total,
+                timings=self.timings)
+            if slot.attention and not old:
+                self.attention_raised.emit(slot.index)
+            line1 = f"Started {eta.fmt_clock(slot.started_at)} · running {eta.fmt_duration(now - slot.started_at)}"
+            if slot.remaining is None:
+                line2 = "Estimating time left..."
+            else:
+                line2 = (f"About {eta.fmt_duration(slot.remaining)} left · done around "
+                         f"{eta.fmt_clock(now + slot.remaining)}" + ("" if slot.remaining_measured else " (rough guess)"))
+            slot.timing_text = line1 + "\n" + line2
+        elif slot.finished_at and slot.state in (SlotState.DONE, SlotState.FAILED, SlotState.ALREADY_OK):
+            slot.timing_text = (f"Finished {eta.fmt_clock(slot.finished_at)} · {eta.fmt_duration(now - slot.finished_at)} ago"
+                                f" · took {eta.fmt_duration(slot.finished_at - slot.started_at)}")
+        else:
+            slot.timing_text = ""
+
+    def tick(self) -> None:
+        """Every few seconds: keep clocks, time left and warnings fresh even when nothing else changes."""
+        now = self._now()
+        for slot in self.slots:
+            before = (slot.timing_text, slot.attention)
+            self._update_timing(slot, now)
+            if (slot.timing_text, slot.attention) != before:
+                self.slot_changed.emit(slot.index)
+        self.batch_changed.emit()
+
+    def batch_summary(self) -> tuple[str, str]:
+        """(text, kind) for the strip under the banner. kind: '' (hide), working, attention, finished."""
+        now = self._now()
+        working = [s for s in self.slots if s.state == SlotState.PROCESSING]
+        if working:
+            n = len(working)
+            parts = [f"{n} drive{'s' if n != 1 else ''} working"]
+            if self._batch_done or self._batch_failed:
+                parts.append(f"{self._batch_done} done" + (f", {self._batch_failed} failed" if self._batch_failed else ""))
+            known = [s.remaining for s in working if s.remaining is not None]
+            if known and len(known) == n:
+                left = max(known)
+                rough = "" if all(s.remaining_measured for s in working) else " (rough guess)"
+                parts.append(f"all finished about {eta.fmt_clock(now + left)}, {eta.fmt_duration(left)} from now{rough}")
+            elif known:
+                parts.append(f"at least {eta.fmt_duration(max(known))} more")
+            else:
+                parts.append("estimating time left")
+            flagged = [s.title for s in working if s.attention]
+            if flagged:
+                parts.append("NEEDS A LOOK: " + ", ".join(flagged))
+                return "   ·   ".join(parts), "attention"
+            return "   ·   ".join(parts), "working"
+        if self._batch_finished_at and any(s.state != SlotState.EMPTY for s in self.slots):
+            parts = [f"Batch finished {eta.fmt_clock(self._batch_finished_at)} "
+                     f"({eta.fmt_duration(now - self._batch_finished_at)} ago)",
+                     f"took {eta.fmt_duration(self._batch_finished_at - self._batch_started)}",
+                     f"{self._batch_done} done" + (f", {self._batch_failed} FAILED: set those aside" if self._batch_failed else "")]
+            return "   ·   ".join(parts), ("attention" if self._batch_failed else "finished")
+        return "", ""
 
     def _on_finished(self, idx: int, run: RunResult, cpath, ppath, warns) -> None:
         if idx >= len(self.slots):
             return
         slot = self.slots[idx]
+        now = self._now()
+        if run.ok:
+            self._learn(slot, slot.step_label_seen, now)          # the last step
+        slot.finished_at, slot.attention, slot.remaining = now, "", None
         slot.run = run
         slot.processor = None
         slot.warnings = list(warns)
@@ -357,6 +505,15 @@ class Controller(QObject):
             if run.possible_cause:
                 slot.message += "  Possible cause: " + run.possible_cause
         slot.fraction = 1.0 if run.ok else slot.fraction
+        if slot.state in (SlotState.DONE, SlotState.ALREADY_OK):
+            self._batch_done += 1
+        else:
+            self._batch_failed += 1
+        self._update_timing(slot, now)
         self.slot_changed.emit(idx)
         for w in warns:
             self.notice.emit(w)
+        if not self.busy():
+            self._batch_finished_at = now
+            self.batch_finished.emit()
+        self.batch_changed.emit()

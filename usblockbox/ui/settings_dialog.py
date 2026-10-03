@@ -296,6 +296,7 @@ class SettingsDialog(QDialog):
         self.minsz = QDoubleSpinBox(); self.minsz.setRange(0.1, 4096); self.minsz.setValue(settings.min_size_gb)
         self.maxsz = QDoubleSpinBox(); self.maxsz.setRange(1, 8192); self.maxsz.setValue(settings.max_size_gb)
         self.confirm = QCheckBox(); self.confirm.setChecked(settings.require_confirm_if_content)
+        self.stall = QSpinBox(); self.stall.setRange(3, 240); self.stall.setValue(settings.stall_minutes)
         self.reuse = QCheckBox(); self.reuse.setChecked(settings.reuse_compliant_drives)
         _check(f, "Dry run: scan and plan only, never erase", self.dry,
                "While this is on, drives are scanned and the plan is shown, but nothing is ever written. "
@@ -305,6 +306,10 @@ class SettingsDialog(QDialog):
                "Turn this on only if you mean to provision those.")
         f.addRow(_label("Minimum drive size (GB)", "Smaller drives are rejected."), self.minsz)
         f.addRow(_label("Maximum drive size (GB)", "Larger drives are rejected. A guard against picking the wrong disk."), self.maxsz)
+        f.addRow(_label("Warn if a drive stalls (minutes)",
+                        "A drive that makes no progress for this long is flagged on its tile and in the batch bar, "
+                        "with a taskbar flash. Nothing is stopped. Large, slow drives can pause for a while; "
+                        "15 minutes is a sensible start."), self.stall)
         _check(f, "Confirm before erasing a drive that has files", self.confirm,
                "Shows a confirmation with the file count before a drive that holds files is erased.")
         _check(f, "Skip drives already compliant and in the records", self.reuse,
@@ -433,7 +438,7 @@ class SettingsDialog(QDialog):
             nm = self.port_table.item(r, 1).text().strip()
             if nm:
                 s.port_names[p.key] = nm
-        s.overwrite_passes = self.passes.value(); s.zero_edge_mb = self.edge.value()
+        s.overwrite_passes = self.passes.value(); s.zero_edge_mb = self.edge.value(); s.stall_minutes = self.stall.value()
         s.verify_readback = self.verify.isChecked()
         s.encryption_method = self.method.currentData(); s.filesystem = self.fs.currentData()
         s.partition_style = self.pstyle.currentData(); s.volume_label = self.label.text() or DEFAULT_VOLUME_LABEL

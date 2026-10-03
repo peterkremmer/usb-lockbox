@@ -177,6 +177,7 @@ class Settings:
     # Sanitization
     overwrite_passes: int = 3               # 0 = clear-disk only
     zero_edge_mb: int = 1
+    stall_minutes: int = 15                 # warn when a working drive makes no progress for this long
     verify_readback: bool = True
     capacity_test: bool = False             # slow; detects counterfeit-capacity drives
 
@@ -306,6 +307,7 @@ class Settings:
         self.simulator_ports = num(self.simulator_ports, 1, 16, d.simulator_ports, int)
         self.overwrite_passes = num(self.overwrite_passes, 0, 7, d.overwrite_passes, int)
         self.zero_edge_mb = num(self.zero_edge_mb, 1, 64, d.zero_edge_mb, int)
+        self.stall_minutes = num(self.stall_minutes, 3, 240, d.stall_minutes, int)
         self.generated_length = num(self.generated_length, 12, 64, d.generated_length, int)
         self.min_password_length = num(self.min_password_length, 8, 64, d.min_password_length, int)
         self.min_size_gb = num(self.min_size_gb, 0.1, 4096, d.min_size_gb)

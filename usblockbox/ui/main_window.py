@@ -7,7 +7,7 @@ from pathlib import Path
 
 from PySide6.QtCore import QTimer, Qt
 from PySide6.QtGui import QFont
-from PySide6.QtWidgets import (QDialog, QDialogButtonBox, QDockWidget, QGridLayout, QHBoxLayout, QInputDialog, QLabel,
+from PySide6.QtWidgets import (QApplication, QDialog, QDialogButtonBox, QDockWidget, QGridLayout, QHBoxLayout, QInputDialog, QLabel,
                                QLineEdit, QMainWindow, QMessageBox, QPushButton, QTableWidget, QTableWidgetItem,
                                QVBoxLayout, QWidget)
 
@@ -67,6 +67,9 @@ class MainWindow(QMainWindow):
         self.banner = QLabel(); self.banner.setAlignment(Qt.AlignCenter)
         self.banner.setFont(QFont("Segoe UI", 12, QFont.Bold)); self.banner.setMinimumHeight(34)
         v.addWidget(self.banner)
+        self.batch_bar = QLabel(); self.batch_bar.setWordWrap(True); self.batch_bar.setAlignment(Qt.AlignCenter)
+        self.batch_bar.setFont(QFont("Segoe UI", 11, QFont.Bold)); self.batch_bar.setMinimumHeight(30); self.batch_bar.hide()
+        v.addWidget(self.batch_bar)
         self.warn_bar = QLabel(); self.warn_bar.setWordWrap(True); self.warn_bar.hide()
         self.warn_bar.setStyleSheet("background:#fef3c7;color:#78350f;border-radius:6px;padding:6px 10px;")
         v.addWidget(self.warn_bar)
@@ -106,6 +109,9 @@ class MainWindow(QMainWindow):
         self.ctl.policy_changed.connect(self._on_policy)
         self.ctl.notice.connect(lambda m: self.status.showMessage(m, 15000))
         self.ctl.unassigned.connect(self._on_unassigned)
+        self.ctl.batch_changed.connect(self._update_batch)
+        self.ctl.batch_finished.connect(self._on_batch_finished)
+        self.ctl.attention_raised.connect(lambda _i: self._get_attention())
 
         # simulator panel: pinned on the right, only while Simulator mode is on
         self.sim_panel = None
@@ -249,6 +255,25 @@ class MainWindow(QMainWindow):
         self._update_banner()
         n = len(self.ctl.slots)
         self.status.showMessage(f"{n} USB port{'s' if n != 1 else ''} detected.", 6000)
+
+    BATCH_STYLES = {"working": "background:#1e40af;color:white;", "attention": "background:#b45309;color:white;",
+                    "finished": "background:#065f46;color:white;"}
+
+    def _update_batch(self) -> None:
+        """The strip under the banner: how many are working, when the batch should finish, who needs a look."""
+        text, kind = self.ctl.batch_summary()
+        self.batch_bar.setVisible(bool(text))
+        if text:
+            self.batch_bar.setText(text)
+            self.batch_bar.setStyleSheet(self.BATCH_STYLES.get(kind, "") + "border-radius:6px;padding:4px 10px;")
+
+    def _get_attention(self) -> None:
+        """Flash the taskbar button (until the window is used) so an operator who walked away notices."""
+        QApplication.alert(self, 0)
+
+    def _on_batch_finished(self) -> None:
+        self._get_attention()
+        QApplication.beep()
 
     def _update_operator(self) -> None:
         self.operator_label.setText(f"Operator: {self.settings.operator or current_user()}   ")

@@ -16,6 +16,7 @@ from usblockbox.ui.theme import apply_tooltip_style
 
 out = Path(sys.argv[1] if len(sys.argv) > 1 else tempfile.mkdtemp())
 out.mkdir(parents=True, exist_ok=True)
+os.environ["USBLOCKBOX_HOME"] = str(out / "home")      # keeps timings.json out of the real data folder
 app = QApplication([])
 apply_tooltip_style()
 s = Settings(); s.csv_dir = str(out / "csv"); s.pdf_dir = str(out / "pdf"); s.set_fixed_password(STATION_PW_DEFAULT)
@@ -102,9 +103,25 @@ win.grab().save(str(out / "2_scanned.png"))
 s.dry_run = False; ctl.apply_settings(s); pump(0.3)
 assert "WARNING" in win.banner.text() and "REAL MODE" not in win.banner.text() and win.windowTitle() == "USB Lockbox", (win.banner.text(), win.windowTitle())
 ctl.process(0); ctl.process(1); ctl.process(2)           # slot 2 (system disk) must refuse
+# unattended-batch messaging: clock times, time left, batch strip, stall warning
+assert pump(10, lambda: ctl.slots[0].state == SlotState.PROCESSING and "Started" in win.tiles[0].timing.text()), win.tiles[0].timing.text()
+assert win.tiles[0].timing.isVisibleTo(win) and "left" in win.tiles[0].timing.text() + "left" and "running" in win.tiles[0].timing.text()
+win._update_batch()
+assert win.batch_bar.isVisibleTo(win) and "working" in win.batch_bar.text(), win.batch_bar.text()
+real_now = ctl._now
+ctl._now = lambda: real_now() + 3600                       # pretend an hour went by with no progress
+ctl.tick(); win._update_batch()
+assert ctl.slots[0].attention and "No progress" in ctl.slots[0].attention, ctl.slots[0].attention
+assert "NEEDS A LOOK" in win.batch_bar.text(), win.batch_bar.text()
+assert "No progress" in win.tiles[0].reasons.text() and win.tiles[0].styleSheet().count("#b45309"), "tile not amber"
+win.grab().save(str(out / "2b_needs_a_look.png"))
+ctl._now = real_now; ctl.tick()
 assert pump(40, lambda: ctl.slots[0].state == SlotState.DONE and ctl.slots[1].state == SlotState.DONE), [x.state for x in ctl.slots]
 assert ctl.slots[2].state == SlotState.REJECTED
 win.grab().save(str(out / "3_done.png"))
+win._update_batch()
+assert win.batch_bar.isVisibleTo(win) and "Batch finished" in win.batch_bar.text(), win.batch_bar.text()
+assert "Finished" in win.tiles[0].timing.text() and "took" in win.tiles[0].timing.text(), win.tiles[0].timing.text()
 s.dry_run = True; ctl.apply_settings(s); pump(0.3)
 
 # ---- simulator mode: orange banner, flyout, own virtual ports

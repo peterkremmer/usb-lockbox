@@ -78,12 +78,19 @@ class Tile(QFrame):
         v.addWidget(self.step)
         v.addWidget(self.bar)
         v.addWidget(self.btn)
+        self.timing = QLabel("")                          # clock times: started, time left, finished
+        self.timing.setFont(QFont("Segoe UI", 9))
+        self.timing.setWordWrap(True)
+        v.insertWidget(v.indexOf(self.btn), self.timing)
         self.bar.hide()
         self.btn.hide()
+        self.timing.hide()
 
     def refresh(self, slot, colors: dict) -> None:
         st: SlotState = slot.state
         bg = colors.get(st.value, "#6b7280")
+        if st == SlotState.PROCESSING and slot.attention:
+            bg = "#b45309"                                   # amber: this working drive needs a look
         fg = _text_color(bg)
         self.setStyleSheet(f"QFrame{{background:{bg};border-radius:12px;}} QLabel{{background:transparent;color:{fg};}}"
                            f"QScrollArea{{background:transparent;border:0;}} QScrollArea > QWidget > QWidget{{background:transparent;}}"
@@ -96,6 +103,8 @@ class Tile(QFrame):
         d = slot.drive
         self.info.setText(f"{d.model}\nS/N {d.serial}  •  {_gb(d.size_bytes)}" if d else "Insert a drive")
         lines: list[str] = []
+        if st == SlotState.PROCESSING and slot.attention:
+            lines.append("⚠ " + slot.attention)
         if st in (SlotState.NEEDS_WORK, SlotState.REJECTED, SlotState.DONE, SlotState.ALREADY_OK, SlotState.FAILED):
             if slot.message:
                 lines.append(slot.message)
@@ -112,4 +121,6 @@ class Tile(QFrame):
         if st == SlotState.PROCESSING:
             self.bar.setValue(int(slot.fraction * 1000))
             self.step.setText(f"{slot.step_label}  –  {slot.fraction * 100:.0f}%")
+        self.timing.setText(slot.timing_text)
+        self.timing.setVisible(bool(slot.timing_text))
         self.btn.setVisible(st == SlotState.NEEDS_WORK)

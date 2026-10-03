@@ -26,6 +26,10 @@ IDs are permanent (LB-###) so commits and chat can refer to them. Move an item t
 
 - [ ] **LB-132 "Could not determine the new drive letter" on a flash drive (real hardware, 2026-10-02):** after Clear-Disk the drive reports MBR with one whole-disk partition of type FAT16, so Initialize-Disk says "already initialized" and New-Partition says "Not enough available capacity". Likely Windows treating a blank removable drive as a "superfloppy" (unconfirmed). The partition/format step also swallows PowerShell errors (only the last command's result is checked): **Changed 2026-10-02, needs a retest on the same drive:** partitioning now uses diskpart (clean, convert, create partition primary), which worked by hand on this drive, then PowerShell formats with errors set to stop and reads the drive letter back. Move to Resolved once a full run succeeds.
 
+- [ ] **LB-133 Drive health (SMART) for USB drives:** not implemented. Plain flash drives normally expose no SMART data; some USB-to-SATA/NVMe enclosures do. Next step: a read-only `--health-dump` to see what Windows reports for the drives actually used, then decide.
+- [ ] **LB-134 Unattended-batch timing (added 2026-10-02) needs real-hardware checking:** estimates, the stall/slow/overdue warnings, the batch strip, taskbar flash and beep are covered by unit tests and the headless smoke test only. Tune the defaults (stall 15 min; slow = 3x usual; overdue = 2x expected) after a few real batches.
+- [ ] **LB-135 Shell Hardware Detection pause (added 2026-10-02):** needs a real run. If the app is killed mid-run the service stays stopped until reboot or `Start-Service ShellHWDetection`.
+
 ## Resolved
 
 ### 2026-10-02 (UI batch 2)

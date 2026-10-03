@@ -11,12 +11,15 @@ Design rules:
 """
 from __future__ import annotations
 
+import atexit
+import contextlib
 import json
 import os
 import random
 import re
 import subprocess
 import sys
+import threading
 import time
 from typing import Optional
 
@@ -311,34 +314,93 @@ ConvertTo-Json -InputObject @($n | Select-Object -Unique)
             raise BackendError("diskpart failed: " + ((p.stdout or "") + (p.stderr or "")).strip()[-600:], "DISKPART")
         return p.stdout
 
-    def init_partition_format(self, drive, style, fs, label):
-        """Partition with diskpart, then format with PowerShell, stopping at the first error.
+    # Windows' Shell Hardware Detection service is what pops up "You need to format the disk in drive X:" when a
+    # new, still-unformatted volume gets a letter. It is paused while we partition and format, and always restarted.
+    _hw_lock = threading.Lock()
+    _hw_users = 0
+    _hw_stopped = False
 
-        Why not Initialize-Disk + New-Partition: after a wipe, Windows reports a blank USB flash drive as
-        MBR with one whole-disk partition ("superfloppy"), so Initialize-Disk says "already initialized" and
-        New-Partition says "Not enough available capacity". diskpart's clean + convert + create partition works
-        (verified by hand on one flash drive, 2026-10-02)."""
+    @classmethod
+    def _hw_restart(cls) -> None:
+        with cls._hw_lock:
+            if cls._hw_stopped:
+                try:
+                    run_ps("Start-Service ShellHWDetection", timeout=60)
+                except BackendError:
+                    pass
+                cls._hw_stopped = False
+
+    @contextlib.contextmanager
+    def _shell_hw_paused(self):
+        cls = type(self)
+        with cls._hw_lock:
+            cls._hw_users += 1
+            if cls._hw_users == 1:
+                try:
+                    out = run_ps("$s=Get-Service ShellHWDetection -ErrorAction SilentlyContinue; "
+                                 "if ($s -and $s.Status -eq 'Running') { Stop-Service ShellHWDetection -Force "
+                                 "-ErrorAction Stop; 'stopped' } else { 'skip' }", timeout=60)
+                    cls._hw_stopped = out.strip().endswith("stopped")
+                except BackendError:
+                    cls._hw_stopped = False            # could not pause it: carry on, the prompt is only a nuisance
+                if cls._hw_stopped:
+                    atexit.register(cls._hw_restart)    # even if the app is closed mid-run
+        try:
+            yield
+        finally:
+            with cls._hw_lock:
+                cls._hw_users -= 1
+                last = cls._hw_users == 0
+            if last:
+                cls._hw_restart()
+
+    def _diskpart(self, script: str, timeout: int = 120) -> str:
+        """Run a diskpart script (only ever built from an integer disk number and fixed words)."""
+        import tempfile
+        fd, path = tempfile.mkstemp(prefix="usblockbox_dp_", suffix=".txt")
+        try:
+            with os.fdopen(fd, "w") as f:
+                f.write(script)
+            try:
+                p = subprocess.run(["diskpart.exe", "/s", path], capture_output=True, text=True, timeout=timeout,
+                                   creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
+            except (OSError, subprocess.TimeoutExpired) as e:
+                raise BackendError(f"diskpart failed to run: {e}", "DISKPART")
+        finally:
+            try:
+                os.remove(path)
+            except OSError:
+                pass
+        if p.returncode != 0:
+            raise BackendError("diskpart failed: " + ((p.stdout or "") + (p.stderr or "")).strip()[-600:], "DISKPART")
+        return p.stdout
+
+    def init_partition_format(self, drive, style, fs, label):
+        """Partition, format, and only then give the volume a letter, stopping at the first error.
+
+        Why diskpart for clean/convert: after a wipe, Windows reports a blank USB flash drive as MBR with one
+        whole-disk partition ("superfloppy"), so Initialize-Disk says "already initialized" and New-Partition says
+        "Not enough available capacity". diskpart clean + convert works (verified by hand on one flash drive,
+        2026-10-02). Why the letter comes last: a lettered, unformatted volume makes Explorer offer to format it."""
         n = int(drive.disk_number)
         style = str(style).upper()
         if style not in ("GPT", "MBR"):
             raise BackendError(f"Unsupported partition style {style!r}.", "BAD_STYLE")
         safe_label = re.sub(r"[^A-Za-z0-9_ -]", "", label)[:11]
-        self._diskpart(f"select disk {n}\nclean\nconvert {style.lower()}\ncreate partition primary\n")
-        get_part = (f"Get-Partition -DiskNumber {n} | Where-Object {{ $_.Type -ne 'Reserved' -and $_.Size -gt 1MB }} "
-                    f"| Sort-Object Size -Descending | Select-Object -First 1")
-        out = run_ps(
-            f"$ErrorActionPreference='Stop'; Update-HostStorageCache; "
-            f"$d=Get-Disk -Number {n}; "
-            f"if ($d.PartitionStyle -ne '{style}') {{ throw \"The disk is $($d.PartitionStyle), expected {style}.\" }}; "
-            f"$p=$null; for ($i=0; $i -lt 20 -and -not $p; $i++) {{ $p={get_part}; if (-not $p) {{ Start-Sleep -Milliseconds 500 }} }}; "
-            f"if (-not $p) {{ throw 'No data partition appeared on the disk.' }}; "
-            f"Format-Volume -Partition $p -FileSystem {fs} -NewFileSystemLabel '{safe_label}' -Confirm:$false | Out-Null; "
-            f"$p=Get-Partition -DiskNumber {n} -PartitionNumber $p.PartitionNumber; "
-            f"if (-not $p.DriveLetter) {{ Add-PartitionAccessPath -DiskNumber {n} -PartitionNumber $p.PartitionNumber "
-            f"-AssignDriveLetter; Start-Sleep -Seconds 1; "
-            f"$p=Get-Partition -DiskNumber {n} -PartitionNumber $p.PartitionNumber }}; "
-            f"if (-not $p.DriveLetter) {{ throw 'Windows did not assign a drive letter.' }}; [string]$p.DriveLetter",
-            timeout=300)
+        with self._shell_hw_paused():
+            self._diskpart(f"select disk {n}\nclean\nconvert {style.lower()}\n")
+            out = run_ps(
+                f"$ErrorActionPreference='Stop'; Update-HostStorageCache; "
+                f"$d=Get-Disk -Number {n}; "
+                f"if ($d.PartitionStyle -ne '{style}') {{ throw \"The disk is $($d.PartitionStyle), expected {style}.\" }}; "
+                f"$p=New-Partition -DiskNumber {n} -UseMaximumSize; "
+                f"Format-Volume -Partition $p -FileSystem {fs} -NewFileSystemLabel '{safe_label}' -Confirm:$false | Out-Null; "
+                f"$p=Get-Partition -DiskNumber {n} -PartitionNumber $p.PartitionNumber; "
+                f"if (-not $p.DriveLetter) {{ Add-PartitionAccessPath -DiskNumber {n} -PartitionNumber $p.PartitionNumber "
+                f"-AssignDriveLetter; Start-Sleep -Seconds 1; "
+                f"$p=Get-Partition -DiskNumber {n} -PartitionNumber $p.PartitionNumber }}; "
+                f"if (-not $p.DriveLetter) {{ throw 'Windows did not assign a drive letter.' }}; [string]$p.DriveLetter",
+                timeout=300)
         letter = out.strip()[-1:]
         if not letter.isalpha():
             raise BackendError(f"Could not determine the new drive letter (PowerShell said {out.strip()!r}).", "NO_LETTER")
