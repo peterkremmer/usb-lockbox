@@ -67,7 +67,7 @@ class Controller(QObject):
     policy_changed = Signal(object)   # PolicyReport
     notice = Signal(str)              # status-bar message
     unassigned = Signal(int)          # count of drives not in a listed port
-    _listed = Signal(object)          # internal: (backend, ports, drives) | Exception
+    _listed = Signal(object)          # internal: (generation, (backend, ports, drives) | Exception)
     _scanned = Signal(int, object, object)
     _progress = Signal(int, str, float)
     _finished = Signal(int, object, object, object, object)
@@ -86,6 +86,7 @@ class Controller(QObject):
         self.slots: list[Slot] = []
         self.last_policy: Optional[PolicyReport] = None
         self._polling = False
+        self._poll_gen = 0                        # bumped on a backend switch so an old scan cannot block or answer the new one
         self._deferred_notice = False
         self.first_scan_done = False              # False until the first scan of USB ports and drives has finished
         self.first_scan_seconds = 0.0
@@ -145,6 +146,8 @@ class Controller(QObject):
             return False
         self.backend, self.simulator = backend, simulator
         self.ports, self.slots, self._raw_ports = [], [], []
+        self._poll_gen += 1                               # a slow scan of the old backend may still be running:
+        self._polling = False                             # do not wait for it, and ignore its answer when it arrives
         self._begin_first_scan()
         self.layout_changed.emit()
         self.timer.start(self._interval())
@@ -250,7 +253,7 @@ class Controller(QObject):
         if self._polling:
             return
         self._polling = True
-        backend = self.backend
+        backend, gen = self.backend, self._poll_gen
 
         def work():
             t0 = time.perf_counter()
@@ -261,14 +264,17 @@ class Controller(QObject):
                 ports = backend.list_ports(occupied)
                 if not diag.startup_done():
                     diag.log.info("Scan pieces: drives %.2f s, ports %.2f s", t1 - t0, time.perf_counter() - t1)
-                self._listed.emit((backend, ports, drives))
+                self._listed.emit((gen, (backend, ports, drives)))
             except Exception as e:   # noqa: BLE001
                 diag.log.exception("Scan failed")
-                self._listed.emit(e)
+                self._listed.emit((gen, e))
 
         threading.Thread(target=work, daemon=True).start()
 
-    def _on_listed(self, result) -> None:
+    def _on_listed(self, message) -> None:
+        gen, result = message
+        if gen != self._poll_gen:                         # answer from before a mode switch: it owns nothing now
+            return
         self._polling = False
         if isinstance(result, Exception):
             self.notice.emit(f"Could not list drives: {result}")

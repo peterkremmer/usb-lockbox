@@ -4,6 +4,7 @@ What changed for people using the app. The notes on each GitHub release repeat t
 
 ## 0.1.2
 
+- Fixed: switching to Simulator mode (or back) while the first real scan was still running made the new view wait for the old scan, so the simulator showed no ports until that scan finished. The old scan is now ignored.
 - The launcher files are now `run_usblockbox.bat` and `run_usblockbox.py` (they were `run_station.*`). **Because of this, 0.1.0 and 0.1.1 cannot update themselves to this version: download the zip from the release page instead.**
 - Wording: the old "station" terms are gone. Messages say "the fixed password" and "this computer", and the PDF record is titled "USB Lockbox Drive Record".
 - Times in the batch view say "just now" instead of "under 1 min ago".

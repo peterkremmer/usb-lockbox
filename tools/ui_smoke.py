@@ -168,5 +168,14 @@ assert pump(10, lambda: c2.first_scan_done)
 assert pump(3, lambda: w2.empty_label.text().startswith("No USB ports found")), w2.empty_label.text()
 assert "First scan:" in w2._diagnostic_summary() and "NOT FINISHED" not in w2._diagnostic_summary()
 w2.grab().save(str(out / "8_no_ports_found.png"))
+# ---- switching to the simulator while a slow real scan is still running must not wait for it
+c3 = Controller(SlowEmpty(), s); w3 = MainWindow(c3, s); w3.show(); pump(0.3)
+assert c3._polling and not c3.first_scan_done
+t0 = time.monotonic()
+c3.set_backend(SimulatedBackend(speed=4.0, port_count=4), simulator=True)
+assert pump(1.0, lambda: len(w3.tiles) == 4), (len(w3.tiles), "simulator ports waited for the old scan")
+assert time.monotonic() - t0 < 1.5
+pump(3)                                              # the old scan finishes now; its answer must be ignored
+assert len(w3.tiles) == 4 and c3.first_scan_done
 print("pdfs:", sorted(p.name for p in (out / "pdf").glob("*.pdf")))
 print("SMOKE OK")
