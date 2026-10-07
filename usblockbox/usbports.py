@@ -19,9 +19,11 @@ import json
 import re
 import struct
 import sys
+import time
 from dataclasses import dataclass, field
 from typing import Callable, Optional
 
+from . import diag
 from .models import Port
 
 HUB_INTERFACE_GUID = "F18A0E88-C30C-11D0-8815-00A0C906BED8"      # GUID_DEVINTERFACE_USB_HUB (usbiodef.h)
@@ -159,10 +161,12 @@ class PortScanner:
         self.last_error = ""
 
     def hubs(self) -> list[HubRaw]:
-        found = _enumerate_hub_interfaces()
+        with diag.timed("find USB hubs"):
+            found = _enumerate_hub_interfaces()
         ids = tuple(sorted(i for i, _p in found))
         if ids != self._ids:
-            self._hubs = self._read(found)
+            with diag.timed("read %d USB hub(s)" % len(found)):
+                self._hubs = self._read(found)
             self._ids = ids
         return self._hubs
 
@@ -180,26 +184,37 @@ class PortScanner:
 
     def _read(self, found: list[tuple[str, str]]) -> list[HubRaw]:
         hubs: list[HubRaw] = []
+        slowest = (0.0, "")
         for instance_id, path in found:
+            t0 = time.perf_counter()
             try:
                 n, props = _query_hub(path)
-            except Exception:   # noqa: BLE001 - skip a hub we cannot open
+            except Exception as e:   # noqa: BLE001 - skip a hub we cannot open
+                diag.log.info("Could not open hub %s: %s", instance_id, e)
                 continue
+            finally:
+                slowest = max(slowest, (time.perf_counter() - t0, instance_id))
             hubs.append(HubRaw(hub_key(path), instance_id, "", n, props))
+        if found:
+            diag.note("slowest single hub (%s)" % slowest[1], slowest[0])
         if hubs:
-            out = self._run_ps(
-                "$ErrorActionPreference='SilentlyContinue'\n"
-                "$ids = $env:USBLOCKBOX_IDS | ConvertFrom-Json\n"
-                "$out=@(); foreach($id in @($ids)){\n"
-                "  $p=(Get-PnpDeviceProperty -InstanceId $id -KeyName 'DEVPKEY_Device_LocationPaths').Data\n"
-                "  $out+=[pscustomobject]@{Id=[string]$id;Paths=@($p)} }\n"
-                "ConvertTo-Json -InputObject @($out) -Depth 4",
-                {"USBLOCKBOX_IDS": json.dumps([h.instance_id for h in hubs])}, 60)
-            rows = json.loads(out) if out.strip() else []
-            paths = {str(r.get("Id", "")).lower(): canonical_path(r.get("Paths") or []) for r in rows if isinstance(r, dict)}
+            paths = self._locations([h.instance_id for h in hubs])
             for h in hubs:
                 h.location = paths.get(h.instance_id.lower(), "")
         return hubs
+
+    def _locations(self, instance_ids: list[str]) -> dict[str, str]:
+        """{lower-case instance id: canonical location path}: one PowerShell call for all hubs."""
+        out = self._run_ps(
+            "$ErrorActionPreference='SilentlyContinue'\n"
+            "$ids = $env:USBLOCKBOX_IDS | ConvertFrom-Json\n"
+            "$out=@(); foreach($id in @($ids)){\n"
+            "  $p=(Get-PnpDeviceProperty -InstanceId $id -KeyName 'DEVPKEY_Device_LocationPaths').Data\n"
+            "  $out+=[pscustomobject]@{Id=[string]$id;Paths=@($p)} }\n"
+            "ConvertTo-Json -InputObject @($out) -Depth 4",
+            {"USBLOCKBOX_IDS": json.dumps(instance_ids)}, 60)
+        rows = json.loads(out) if out.strip() else []
+        return {str(r.get("Id", "")).lower(): canonical_path(r.get("Paths") or []) for r in rows if isinstance(r, dict)}
 
 
 def _enumerate_hub_interfaces() -> list[tuple[str, str]]:

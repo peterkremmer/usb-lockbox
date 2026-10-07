@@ -8,6 +8,10 @@ What changed for people using the app. The notes on each GitHub release repeat t
 - Wording: the old "station" terms are gone. Messages say "the fixed password" and "this computer", and the PDF record is titled "USB Lockbox Drive Record".
 - Times in the batch view say "just now" instead of "under 1 min ago".
 - README rewritten with current screenshots, install steps and a troubleshooting section.
+- `run_usblockbox.bat` now checks the setup before starting. It finds a suitable Python (3.10 to 3.14, 64-bit, installed for all users), checks that the packages in `requirements.txt` are installed system-wide and recent enough, and offers to install or update them with administrator approval. When something is missing it explains what to do and keeps its window open.
+- New read-only diagnostic `--startup-timing` times each step of the first scan, to find out why the ports can take long to appear on some PCs.
+- The empty window now says "Scanning USB ports..." (with the seconds elapsed, and a note after 45 seconds that this PC is slow to answer) instead of "No USB ports detected yet...". "No USB ports found." appears only after a scan has finished.
+- Logging for troubleshooting in `data\logs`: a rotating log (1 MB, 5 files, 30 days), crash capture and a launcher log. It records what the app did, how long each PowerShell call and the first scan took, and any error; it never records passwords or recovery keys. **Diagnostics > Save diagnostics for support...** bundles the logs and the settings (without secrets) into one zip to send.
 
 ## 0.1.1
 

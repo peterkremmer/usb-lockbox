@@ -23,7 +23,7 @@ import threading
 import time
 from typing import Optional
 
-from .. import usbports
+from .. import diag, usbports
 from ..junk import junk_label
 from ..models import BitLockerInfo, DriveInfo, PartitionInfo, Port, VolumeInfo
 from .base import Backend, BackendError, Cancelled, CancelCheck, Progress
@@ -46,17 +46,22 @@ def describe_counts(top: int, per: dict, hidden: set, mac_meta: int = 0) -> str:
     return ", ".join(parts)
 
 
-def run_ps(script: str, env_extra: Optional[dict] = None, timeout: int = 120) -> str:
+def run_ps(script: str, env_extra: Optional[dict] = None, timeout: int = 120, label: str = "") -> str:
     env = dict(os.environ)
     if env_extra:
         env.update(env_extra)
+    label = label or diag.ps_label(script)        # the cmdlet name only: never the script text
+    t0 = time.perf_counter()
     try:
         p = subprocess.run(
             ["powershell.exe", "-NoProfile", "-NonInteractive", "-Command", script],
             capture_output=True, text=True, timeout=timeout, env=env,
             creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
     except (OSError, subprocess.TimeoutExpired) as e:
+        why = "timed out after %s s" % timeout if isinstance(e, subprocess.TimeoutExpired) else str(e)
+        diag.ps_call(label, time.perf_counter() - t0, -1, why)
         raise BackendError(f"PowerShell failed to run: {e}", "PS_LAUNCH")
+    diag.ps_call(label, time.perf_counter() - t0, p.returncode, p.stderr or p.stdout)
     if p.returncode != 0:
         raise BackendError((p.stderr or p.stdout).strip() or f"PowerShell exit {p.returncode}", "PS_ERROR")
     return p.stdout
@@ -133,11 +138,11 @@ $sd=$env:SystemDrive.Substring(0,1)
 $n+=@(Get-Partition -DriveLetter $sd | ForEach-Object { $_.DiskNumber })
 Get-CimInstance Win32_PageFileUsage | ForEach-Object { $l=$_.Name.Substring(0,1); $n+=@(Get-Partition -DriveLetter $l -ErrorAction SilentlyContinue | ForEach-Object { $_.DiskNumber }) }
 ConvertTo-Json -InputObject @($n | Select-Object -Unique)
-""")
+""", label="find system disks")
         return {int(x) for x in _as_list(_json(out))}
 
     def list_usb_disks(self) -> list[DriveInfo]:
-        rows = _as_list(_json(run_ps(_LIST_SCRIPT, timeout=90)))
+        rows = _as_list(_json(run_ps(_LIST_SCRIPT, timeout=90, label="list USB disks")))
         return [self._to_drive(r) for r in rows]
 
     def get_drive(self, disk_number: int) -> Optional[DriveInfo]:
@@ -164,8 +169,10 @@ ConvertTo-Json -InputObject @($n | Select-Object -Unique)
         for v in _as_list(r.get("Vols")):
             d.volumes.append(VolumeInfo(v["Letter"], v["FS"], v["Label"], int(v["Size"] or 0),
                                         int((v["Size"] or 0) - (v["Free"] or 0)), None))
-        d.mbr_boot_code_present = self._boot_code_present(d.disk_number)
-        self._fill_bitlocker_and_files(d)
+        with diag.timed("read boot sector of disk %d" % d.disk_number):
+            d.mbr_boot_code_present = self._boot_code_present(d.disk_number)
+        with diag.timed("read BitLocker state and count files on disk %d" % d.disk_number):
+            self._fill_bitlocker_and_files(d)
         return d
 
     def _boot_code_present(self, n: int) -> bool:
@@ -194,7 +201,9 @@ ConvertTo-Json -InputObject @($n | Select-Object -Unique)
                         d.bitlocker.unlocked_with_fixed_password = True
                         d.bitlocker.locked = False
             if not (d.bitlocker.present and d.bitlocker.locked):
+                t0 = time.perf_counter()
                 v.file_count, v.file_detail = self._count_files(v.drive_letter)
+                diag.note("count files on %s: (%s files)" % (v.drive_letter, v.file_count), time.perf_counter() - t0)
 
     @staticmethod
     def _count_files(letter: str, cap: int = 200_000) -> tuple[Optional[int], str]:
@@ -470,3 +479,58 @@ def ports_dump() -> int:
     occupied = {usbports.norm(d.location_path) for d in drives if d.location_path}
     print(usbports.dump(run_ps, occupied))
     return 0
+
+
+def startup_timing() -> int:
+    """Read-only: time every step the first scan performs, so a slow start can be traced to its cause."""
+    import time
+    from .. import policy
+
+    rows: list[tuple[float, str]] = []
+
+    def timed(label, fn):
+        t = time.perf_counter()
+        note = ""
+        try:
+            result = fn()
+        except Exception as e:   # noqa: BLE001
+            result, note = None, f"   FAILED: {type(e).__name__}: {e}"
+        dt = time.perf_counter() - t
+        rows.append((dt, label))
+        print(f"{dt:7.2f} s  {label}{note}", flush=True)
+        return result
+
+    print("Timing each step of the first scan (nothing is changed)...\n", flush=True)
+    t0 = time.perf_counter()
+    timed("PowerShell start-up only (no command)", lambda: run_ps("1", timeout=120))
+    timed("Registry policy read", policy.read_raw)
+    found = timed("Find USB hubs (SetupAPI)", usbports._enumerate_hub_interfaces) or []
+    print(f"         ({len(found)} hub interface(s) found)", flush=True)
+    slow_hubs = []
+    t = time.perf_counter()
+    for instance_id, path in found:
+        h0 = time.perf_counter()
+        try:
+            usbports._query_hub(path)
+        except Exception:   # noqa: BLE001
+            pass
+        slow_hubs.append((time.perf_counter() - h0, instance_id))
+    total = time.perf_counter() - t
+    rows.append((total, f"Ask each hub about its ports ({len(found)} hubs)"))
+    print(f"{total:7.2f} s  Ask each hub about its ports ({len(found)} hubs)", flush=True)
+    for dt, name in sorted(slow_hubs, reverse=True)[:3]:
+        print(f"         slowest hubs: {dt:5.2f} s  {name}", flush=True)
+    ids = [i for i, _p in found]
+    timed(f"Look up location paths for {len(ids)} hubs (one PowerShell call)",
+          lambda: usbports.PortScanner(run_ps)._locations(ids))
+    be = WindowsBackend()
+    timed("List USB disks (PowerShell)", be.list_usb_disks)
+    timed("System disk numbers (PowerShell)", be.system_disk_numbers)
+    timed("Whole port scan, cold (what the first poll does)", lambda: usbports.PortScanner(run_ps).scan(set()))
+    print(f"\n{time.perf_counter() - t0:7.2f} s  total\n")
+    print("Slowest steps:")
+    for dt, label in sorted(rows, reverse=True)[:3]:
+        print(f"  {dt:6.2f} s  {label}")
+    print("\nSend this output to whoever is diagnosing the slow start.")
+    return 0
+

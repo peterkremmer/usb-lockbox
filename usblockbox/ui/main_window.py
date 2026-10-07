@@ -8,16 +8,17 @@ from pathlib import Path
 from PySide6.QtCore import QTimer, Qt
 from PySide6.QtGui import QFont
 from PySide6.QtWidgets import (QApplication, QDialog, QDialogButtonBox, QDockWidget, QGridLayout, QHBoxLayout, QInputDialog, QLabel,
-                               QLineEdit, QMainWindow, QMessageBox, QPushButton, QTableWidget, QTableWidgetItem,
+                               QLineEdit, QMainWindow, QMenu, QMessageBox, QPushButton, QTableWidget, QTableWidgetItem,
                                QVBoxLayout, QWidget)
 
-from .. import __version__, updater
+from .. import __version__, diag, updater
 from ..appinfo import APP_NAME
 from .. import policy as policy_mod
 from ..backends.simulated import SimulatedBackend
 from ..config import Settings, current_user, method_label
 from ..models import SlotState
 from .controller import Controller
+from .scanning import scanning_text
 from .settings_dialog import SettingsDialog
 from .sim_panel import SIM_BG, SIM_COLOR, SimulatorPanel
 from .tile import Tile
@@ -84,6 +85,13 @@ class MainWindow(QMainWindow):
         btn("EMERGENCY STOP", self.ctl.emergency_stop, "background:#991b1b;color:white;font-weight:bold;")
         btn("Open records folder", self.on_open_records)
         btn("Settings", self.on_settings)
+        diag_btn = QPushButton("Diagnostics"); diag_btn.setMinimumHeight(36)
+        diag_menu = QMenu(diag_btn)
+        diag_menu.addAction("Save diagnostics for support...", self.on_save_diagnostics)
+        diag_menu.addAction("Open logs folder", self.on_open_logs)
+        diag_btn.setMenu(diag_menu)
+        diag_btn.setToolTip("Logs for troubleshooting are kept in the Data\\logs folder. Save diagnostics bundles them into one file to send.")
+        bar.addWidget(diag_btn)
         self.sim_btn = btn("Simulator mode", self.toggle_simulator_mode)
         self.sim_btn.setCheckable(True)
         v.addLayout(bar)
@@ -112,6 +120,10 @@ class MainWindow(QMainWindow):
         self.ctl.batch_changed.connect(self._update_batch)
         self.ctl.batch_finished.connect(self._on_batch_finished)
         self.ctl.attention_raised.connect(lambda _i: self._get_attention())
+        self.ctl.scan_state_changed.connect(self._refresh_scan_label)
+        self._scan_timer = QTimer(self)
+        self._scan_timer.timeout.connect(self._refresh_scan_label)
+        self._scan_timer.start(1000)
 
         # simulator panel: pinned on the right, only while Simulator mode is on
         self.sim_panel = None
@@ -234,7 +246,7 @@ class MainWindow(QMainWindow):
             self.grid.removeWidget(self.empty_label); self.empty_label.hide(); self.empty_label.deleteLater(); self.empty_label = None
         n = len(self.ctl.slots)
         if n == 0:
-            self.empty_label = QLabel("No USB ports detected yet...")
+            self.empty_label = QLabel(self._scan_text())
             self.empty_label.setAlignment(Qt.AlignCenter)
             self.empty_label.setFont(QFont("Segoe UI", 14))
             self.grid.addWidget(self.empty_label, 0, 0)
@@ -246,6 +258,16 @@ class MainWindow(QMainWindow):
             self.tiles.append(t); self.grid.addWidget(t, i // cols, i % cols)
             t.show()                      # widgets added to an already-visible window start hidden
             t.refresh(self.ctl.slots[i], self.settings.colors)
+
+    def _scan_text(self) -> str:
+        return scanning_text(self.ctl.scan_elapsed(), self.ctl.first_scan_done, self.ctl.scan_error,
+                             "" if self.simulator_mode else self.hw_backend.ports_note)
+
+    def _refresh_scan_label(self) -> None:
+        """Keeps the "Scanning..." text moving (dots, seconds) and switches it when the first scan ends."""
+        label = getattr(self, "empty_label", None)
+        if label is not None:
+            label.setText(self._scan_text())
 
     def _on_layout_changed(self) -> None:
         """The USB port list changed (hub plugged in or removed, or the mode switched): rebuild the tiles."""
@@ -359,6 +381,48 @@ class MainWindow(QMainWindow):
             os.startfile(str(p))   # noqa: S606
         else:
             self.status.showMessage(f"Records folder: {p}", 10000)
+
+    def on_open_logs(self) -> None:
+        try:
+            p = diag.logs_dir()
+        except OSError as e:
+            self.status.showMessage(f"Could not open the logs folder: {e}", 10000)
+            return
+        if sys.platform == "win32":
+            os.startfile(str(p))   # noqa: S606
+        else:
+            self.status.showMessage(f"Logs folder: {p}", 10000)
+
+    def _diagnostic_summary(self) -> str:
+        c = self.ctl
+        lines = [f"Mode: {'simulator' if self.simulator_mode else 'dry run' if self.settings.dry_run else 'REAL (erase enabled)'}"]
+        lines.append(f"First scan: {c.first_scan_seconds:.1f} s" if c.first_scan_done
+                     else f"First scan: NOT FINISHED after {c.scan_elapsed():.0f} s")
+        if c.scan_error:
+            lines.append(f"Latest scan error: {c.scan_error}")
+        lines.append(f"Ports shown: {len(c.ports)} (Windows reported {len(c.available_ports())})")
+        if not self.simulator_mode and self.hw_backend.ports_note:
+            lines.append(f"Port note: {self.hw_backend.ports_note}")
+        for s in c.slots:
+            d = s.drive
+            lines.append(f"  {s.title}: {s.state.name}" + (f" - {d.model}, serial {d.serial}, {d.size_gb:.1f} GB" if d else ""))
+        lines.append(f"Policy: {self.policy_chip.text()}")
+        return "\n".join(lines)
+
+    def on_save_diagnostics(self) -> None:
+        try:
+            path = diag.save_bundle(self.settings, self._diagnostic_summary(), elevated=self.hw_backend.elevated,
+                                    mode="simulator" if self.simulator_mode else "dry run" if self.settings.dry_run else "real")
+        except Exception as e:   # noqa: BLE001
+            QMessageBox.warning(self, "Diagnostics", f"Could not save the diagnostics file:\n{e}")
+            return
+        diag.log.info("Diagnostics bundle saved: %s", path)
+        QMessageBox.information(
+            self, "Diagnostics saved",
+            f"Saved:\n{path}\n\nSend this one file to whoever is helping you. It holds the logs and the settings "
+            f"(no passwords or recovery keys). Drive records are not included.")
+        if sys.platform == "win32":
+            os.startfile(str(path.parent))   # noqa: S606
 
     def on_settings(self) -> None:
         s = self.settings

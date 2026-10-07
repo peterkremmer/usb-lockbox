@@ -131,8 +131,8 @@ t = win.banner.text()
 assert "SIMULATOR MODE" in t and "service" not in t.lower() and "service" not in win.windowTitle().lower(), t
 assert pump(5, lambda: len(win.tiles) == 4) and s.simulator_ports == 4, (len(win.tiles), s.simulator_ports)
 win.grab().save(str(out / "4_simulator.png"))
-win.sim_panel.count.setValue(6); pump(1)
-assert len(win.tiles) == 6 and s.simulator_ports == 6
+win.sim_panel.count.setValue(6)
+assert pump(6, lambda: len(win.tiles) == 6) and s.simulator_ports == 6, (len(win.tiles), s.simulator_ports)
 combo = win.sim_panel.rows[2][1]; combo.setCurrentIndex(combo.findData("odd_boot"))
 win.sim_panel._insert(3, combo)
 assert pump(5, lambda: ctl.slots[2].drive is not None and ctl.slots[2].state == SlotState.NEEDS_WORK)
@@ -149,5 +149,24 @@ assert not win.simulator_mode and not win.dock.isVisible() and win.styleSheet() 
 assert "SIMULAT" not in win.banner.text().upper() and policy.SIM_RAW is None
 assert pump(5, lambda: len(win.tiles) == 3), len(win.tiles)
 win.grab().save(str(out / "6_normal_again.png"))
+# ---- a slow first scan says "Scanning...", then "No USB ports found." when it ends empty-handed
+from usblockbox.backends.empty import NoHardwareBackend
+from usblockbox import diag
+
+class SlowEmpty(NoHardwareBackend):
+    ports_note = ""
+    def list_usb_disks(self):
+        time.sleep(2.5)
+        return []
+
+c2 = Controller(SlowEmpty(), s); w2 = MainWindow(c2, s); w2.show()
+assert pump(1.5, lambda: getattr(w2, "empty_label", None) is not None and w2.empty_label.text().startswith("Scanning USB ports")), \
+    getattr(w2, "empty_label", None) and w2.empty_label.text()
+assert not c2.first_scan_done and "NOT FINISHED" in w2._diagnostic_summary(), w2._diagnostic_summary()
+w2.grab().save(str(out / "7_scanning.png"))
+assert pump(10, lambda: c2.first_scan_done)
+assert pump(3, lambda: w2.empty_label.text().startswith("No USB ports found")), w2.empty_label.text()
+assert "First scan:" in w2._diagnostic_summary() and "NOT FINISHED" not in w2._diagnostic_summary()
+w2.grab().save(str(out / "8_no_ports_found.png"))
 print("pdfs:", sorted(p.name for p in (out / "pdf").glob("*.pdf")))
 print("SMOKE OK")

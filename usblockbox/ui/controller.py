@@ -10,6 +10,7 @@ from typing import Optional
 
 from PySide6.QtCore import QObject, QTimer, Signal
 
+from .. import diag
 from ..backends.base import Backend
 from ..models import (DriveInfo, PolicyReport, Port, RunResult, ScanResult, SlotState, Verdict)
 from ..pipeline import Processor, plan_steps
@@ -73,6 +74,7 @@ class Controller(QObject):
     batch_changed = Signal()          # the batch summary text may have changed
     batch_finished = Signal()         # nothing is processing any more after a batch
     attention_raised = Signal(int)    # a working drive looks stuck, slow or overdue
+    scan_state_changed = Signal()     # the first scan finished or failed (the "Scanning..." text depends on it)
 
     def __init__(self, backend: Backend, settings: Settings, simulator: bool = False, parent=None):
         super().__init__(parent)
@@ -85,6 +87,11 @@ class Controller(QObject):
         self.last_policy: Optional[PolicyReport] = None
         self._polling = False
         self._deferred_notice = False
+        self.first_scan_done = False              # False until the first scan of USB ports and drives has finished
+        self.first_scan_seconds = 0.0
+        self.scan_error = ""                      # why the latest scan failed ("" if it did not)
+        self._scan_started = time.monotonic()
+        self._scan_warned: set[int] = set()
         self._lock = threading.Lock()
         self._listed.connect(self._on_listed)
         self._scanned.connect(self._on_scanned)
@@ -108,8 +115,19 @@ class Controller(QObject):
         return 3000 if self.backend.real else 1500
 
     def start(self, interval_ms: Optional[int] = None) -> None:
+        self._begin_first_scan()
         self.timer.start(interval_ms or self._interval())
         self.poll()
+
+    def _begin_first_scan(self) -> None:
+        self.first_scan_done, self.scan_error = False, ""
+        self._scan_started = time.monotonic()
+        self._scan_warned = set()
+        diag.reset_startup()
+        diag.log.info("First scan started (backend: %s)", self.backend.name)
+
+    def scan_elapsed(self) -> float:
+        return 0.0 if self.first_scan_done else time.monotonic() - self._scan_started
 
     def stop(self) -> None:
         self.timer.stop()
@@ -127,6 +145,7 @@ class Controller(QObject):
             return False
         self.backend, self.simulator = backend, simulator
         self.ports, self.slots, self._raw_ports = [], [], []
+        self._begin_first_scan()
         self.layout_changed.emit()
         self.timer.start(self._interval())
         self.refresh_policy()
@@ -160,8 +179,11 @@ class Controller(QObject):
 
         def work():
             try:
-                rep = policy_mod.probe(s, pw, raw)
+                with diag.timed("BitLocker policy check"):
+                    rep = policy_mod.probe(s, pw, raw)
+                diag.log.info("Policy: %d setting(s) read, effective method %s", len(rep.items), rep.effective_method or "-")
             except Exception as e:   # noqa: BLE001
+                diag.log.warning("Policy check failed: %s", e)
                 rep = PolicyReport(available=False, note=f"Policy check failed: {e}")
             if backend is self.backend:
                 self.last_policy = rep
@@ -213,6 +235,7 @@ class Controller(QObject):
                 self.notice.emit("The USB port list changed; it will update when processing finishes.")
             return
         self._deferred_notice = False
+        diag.log.info("USB ports changed: %d port(s) shown (%d reported by Windows)", len(ports), len(raw))
         old = {s.port.key: s for s in self.slots}
         self.ports = list(ports)
         self.slots = []
@@ -230,11 +253,17 @@ class Controller(QObject):
         backend = self.backend
 
         def work():
+            t0 = time.perf_counter()
             try:
                 drives = backend.list_usb_disks()
+                t1 = time.perf_counter()
                 occupied = {d.location_path.lower() for d in drives if d.location_path}
-                self._listed.emit((backend, backend.list_ports(occupied), drives))
+                ports = backend.list_ports(occupied)
+                if not diag.startup_done():
+                    diag.log.info("Scan pieces: drives %.2f s, ports %.2f s", t1 - t0, time.perf_counter() - t1)
+                self._listed.emit((backend, ports, drives))
             except Exception as e:   # noqa: BLE001
+                diag.log.exception("Scan failed")
                 self._listed.emit(e)
 
         threading.Thread(target=work, daemon=True).start()
@@ -243,11 +272,22 @@ class Controller(QObject):
         self._polling = False
         if isinstance(result, Exception):
             self.notice.emit(f"Could not list drives: {result}")
+            self.scan_error = str(result)
+            self.scan_state_changed.emit()
             return
         backend, ports, drives = result
         if backend is not self.backend:                   # a stale answer from before a mode switch
             return
         self._sync_ports(ports)
+        if not self.first_scan_done or self.scan_error:
+            self.scan_error = ""
+            if not self.first_scan_done:
+                self.first_scan_done = True
+                self.first_scan_seconds = time.monotonic() - self._scan_started
+                diag.log.info("First scan finished in %.1f s: %d port(s) shown, %d drive(s) present",
+                              self.first_scan_seconds, len(self.ports), len(drives))
+                diag.mark_startup_done()
+            self.scan_state_changed.emit()
         present: dict[int, DriveInfo] = {}
         unassigned = 0
         for d in drives:
@@ -264,6 +304,7 @@ class Controller(QObject):
                 if slot.state in (SlotState.PROCESSING,):
                     continue          # worker will report the failure itself
                 if slot.state != SlotState.EMPTY:
+                    diag.log.info("Drive removed from %s", slot.title)
                     self._reset(slot)
                 continue
             if slot.state == SlotState.PROCESSING:
@@ -272,6 +313,8 @@ class Controller(QObject):
             if same and slot.state != SlotState.EMPTY:
                 continue
             slot.drive = d
+            diag.log.info("Drive detected on %s: %s, serial %s, %.1f GB, %d volume(s)", slot.title, d.model,
+                          d.serial, d.size_gb, len(d.volumes))
             slot.state = SlotState.SCANNING
             slot.message = "Checking drive..."
             slot.scan = slot.run = None
@@ -312,6 +355,7 @@ class Controller(QObject):
         if slot.state != SlotState.SCANNING or slot.drive is None or slot.drive.serial != res.drive.serial:
             return
         self.last_policy = pol
+        diag.log.info("Checked drive on %s: verdict %s, %d finding(s)", slot.title, res.verdict.name, len(res.findings))
         slot.scan = res
         slot.drive = res.drive
         if res.verdict == Verdict.REJECTED:
@@ -346,6 +390,8 @@ class Controller(QObject):
         rem = eta.remaining(slot.plan, slot.plan[0], 0.0, 0.0, slot.size_gb, slot.passes, self.timings)
         slot.expected_total = rem[0] if rem and rem[1] else None     # only judge "overdue" against measured numbers
         slot.state = SlotState.PROCESSING
+        diag.log.info("Processing started on %s (serial %s, %.1f GB, steps: %s, dry run: %s)", slot.title,
+                      slot.scan.drive.serial, slot.size_gb, ", ".join(slot.plan), s.dry_run)
         slot.fraction = 0.0; slot.step_label = "Starting"; slot.message = "Working - do not remove."
         self._update_timing(slot, now)
         self.slot_changed.emit(idx)
@@ -386,6 +432,8 @@ class Controller(QObject):
         slot = self.slots[idx]
         now = self._now()
         if label != slot.step_label_seen:                     # a new step began: learn how long the last one took
+            diag.log.info("%s: step '%s' (previous step took %.0f s)", slot.title, label,
+                          now - slot.step_started if slot.step_label_seen else 0.0)
             self._learn(slot, slot.step_label_seen, now)
             slot.step_label_seen, slot.step_started, slot.last_progress_at = label, now, now
         if frac > slot.last_frac + 0.0005:
@@ -443,6 +491,12 @@ class Controller(QObject):
     def tick(self) -> None:
         """Every few seconds: keep clocks, time left and warnings fresh even when nothing else changes."""
         now = self._now()
+        if not self.first_scan_done:                          # leave a trail if the first scan hangs
+            waited = time.monotonic() - self._scan_started
+            for limit in (15, 45, 120, 300):
+                if waited >= limit and limit not in self._scan_warned:
+                    self._scan_warned.add(limit)
+                    diag.log.warning("First scan still running after %d s", limit)
         for slot in self.slots:
             before = (slot.timing_text, slot.attention)
             self._update_timing(slot, now)
@@ -489,6 +543,8 @@ class Controller(QObject):
         if run.ok:
             self._learn(slot, slot.step_label_seen, now)          # the last step
         slot.finished_at, slot.attention, slot.remaining = now, "", None
+        diag.log.info("%s finished after %.0f s: %s%s", slot.title, now - slot.started_at,
+                      "OK (" + (run.outcome or "done") + ")" if run.ok else "FAILED", "" if run.ok else " - " + (run.error or ""))
         slot.run = run
         slot.processor = None
         slot.warnings = list(warns)

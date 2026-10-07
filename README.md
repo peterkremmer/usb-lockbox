@@ -4,6 +4,45 @@
 
 Scan, wipe and BitLocker-encrypt USB drives on a Windows 11 (Pro or Enterprise) PC, in batches, with one big status tile per USB port and a CSV row plus a PDF record for every drive. Python + PySide6. No installer, no database.
 
+## Get started
+
+![Get started in three steps](docs/images/get-started.png)
+
+You need **Windows 11 Pro or Enterprise** (for BitLocker) and an **administrator account**.
+
+> [!IMPORTANT]
+> Install **64-bit Python for all users**. A Python installed for just your user (the Microsoft Store version, or the python.org "Install Now" button) can fail when Windows asks for a different administrator's password, so the launcher refuses it.
+
+### 1. Install Python (64-bit, for all users)
+
+1. Go to the [Python for Windows download page](https://www.python.org/downloads/windows/) and download the **Windows installer (64-bit)** for Python **3.13 or 3.14**. Versions 3.10 to 3.14 work.
+2. Run it and choose **Customize installation**. Make sure **Install Python for all users** is ticked. The wording can differ a little between installer versions.
+3. Finish the installer.
+
+Already have Python? Skip this step. The launcher in step 3 checks it for you and tells you if it needs changing.
+
+### 2. Download USB Lockbox
+
+Download the latest zip from the [Releases page](https://github.com/peterkremmer/usb-lockbox/releases) and unzip it somewhere you can write to, such as `C:\USB Lockbox`. (Or clone the repository.)
+
+### 3. Double-click `run_usblockbox.bat`
+
+The launcher checks your setup before it starts the app:
+
+* If Python is missing, too old, 32-bit or installed for your user only, the launcher window says so, shows what to do, and stays open until you press a key. If it cannot find Python right after you installed it, close the window and run it again; if that still fails, sign out and back in.
+* If the packages the app needs (PySide6, reportlab) are missing or too old, it offers to install them. Windows asks you to approve administrator access for that.
+* Then the app starts and Windows asks for administrator rights (UAC prompt). Approve it.
+
+> [!NOTE]
+> On first start the window can show **Scanning USB ports...** for a while. On some PCs, especially with security software, this can take up to a minute. If something goes wrong, click **Diagnostics > Save diagnostics for support...** and send me the file. See [Troubleshooting](#troubleshooting).
+
+<details>
+<summary>Advanced: using a per-user Python</summary>
+
+If you sign in as an administrator and want to use a per-user Python anyway, run `set USBLOCKBOX_ALLOW_USER_PYTHON=1` in Command Prompt and start the launcher from that window.
+
+</details>
+
 > **Status: early (v0.1.x).** Tested with unit tests, a headless GUI test and a few USB flash drives on one Windows 11 PC. Expect rough edges. The app starts in **dry-run** (it scans and plans but erases nothing). Once you turn dry-run off, it **permanently erases the drives you process**, so try it on sacrificial drives first. No warranty (see [LICENSE](LICENSE)).
 
 Planned work and fixed issues: [ISSUES.md](ISSUES.md). Security notes: [SECURITY.md](SECURITY.md).
@@ -35,16 +74,6 @@ When the last drive ends, the strip says when the batch finished and how long it
 Simulator mode (virtual drives, nothing touches a real disk):
 
 ![Simulator mode](docs/images/screenshot-simulator.png)
-
-## Install and run
-
-You need Windows 11 Pro or Enterprise (BitLocker) and Python 3.10 or newer.
-
-1. Download the latest zip from the [Releases page](https://github.com/peterkremmer/usb-lockbox/releases) and unzip it (or clone the repository).
-2. In that folder: `py -m pip install -r requirements.txt`
-3. Double-click `run_usblockbox.bat`, or run `py -m usblockbox`.
-
-On Windows the app asks for administrator rights at start (UAC prompt); `--no-elevate` skips that, in which case drives can be scanned but never erased.
 
 ## Using it
 
@@ -140,11 +169,18 @@ Never touches boot/system/pagefile disks, non-USB buses, fixed disks (unless all
 
 ## Troubleshooting
 
-Three read-only diagnostics print what the app sees; attach the output when you report a problem (remove anything you do not want to share):
+**Logs.** The app keeps a small log in `data\logs`: `usblockbox.log` (what the app did and how long each step took), `crash.log` (hard crashes) and `launcher.log` (what the launcher check found). The log rotates at 1 MB, keeps 5 files and deletes files older than 30 days, so it cannot grow without limit. It never contains passwords or recovery keys. When something goes wrong, click **Diagnostics > Save diagnostics for support...** in the app: it zips the logs, a copy of the settings without secrets and a short summary into one file in that folder. Send that file. Drive records are not included. **Diagnostics > Open logs folder** opens the folder. The window shows "Scanning USB ports..." while the first scan runs, and after 45 seconds says the PC is slow to answer.
+
+If you cannot start the app, send `data\logs\launcher.log` instead.
+
+You normally do not need these. If you are asked for more detail, four read-only diagnostics print what the app sees (remove anything you do not want to share before sending the output):
 
     py -m usblockbox --ports-dump        USB hubs, ports and which drive is on which port
     py -m usblockbox --selftest-windows  disks, serials, partitions and BitLocker state (run elevated)
     py -m usblockbox --policy-dump       the BitLocker policy settings it found
+    py -m usblockbox --startup-timing    how long each step of the first scan takes (run from an administrator prompt)
+
+`--startup-timing` shows which step of the first scan is slow, for example PowerShell start-up, one USB hub, or the disk listing. The saved diagnostics file already contains the same timings.
 
 Report problems on the [Issues](https://github.com/peterkremmer/usb-lockbox/issues) page. For security problems see [SECURITY.md](SECURITY.md).
 

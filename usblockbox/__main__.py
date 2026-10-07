@@ -1,10 +1,11 @@
-"""Entry point:  python -m usblockbox   (add --selftest-windows / --policy-dump for read-only diagnostics)."""
+"""Entry point:  python -m usblockbox   (add --selftest-windows / --policy-dump / --ports-dump / --startup-timing for read-only diagnostics)."""
 from __future__ import annotations
 
 import ctypes
 import json
 import sys
 
+from . import diag
 from .config import IS_WINDOWS, Settings
 
 
@@ -26,6 +27,8 @@ def _relaunch_elevated(argv: list[str]) -> bool:
     root = Path(__file__).resolve().parent.parent
     params = subprocess_list2cmdline(["-m", "usblockbox", "--no-elevate", *argv])
     rc = ctypes.windll.shell32.ShellExecuteW(None, "runas", exe, params, str(root), 1)
+    diag.launcher_note("Not running as administrator; asked Windows for elevation (%s)"
+                       % ("accepted" if rc > 32 else "refused, code %s" % rc))
     return rc > 32
 
 
@@ -51,6 +54,13 @@ def main(argv: list[str] | None = None) -> int:
         from .backends.windows import ports_dump
         return ports_dump()
 
+    if "--startup-timing" in argv:
+        if not IS_WINDOWS:
+            print("--startup-timing needs Windows.")
+            return 1
+        from .backends.windows import startup_timing
+        return startup_timing()
+
     from PySide6.QtWidgets import QApplication
     from .ui.controller import Controller
     from .ui.main_window import MainWindow
@@ -60,10 +70,14 @@ def main(argv: list[str] | None = None) -> int:
     apply_tooltip_style()
     settings = Settings.load()
 
+    admin = _is_admin() if IS_WINDOWS else True
+    if IS_WINDOWS and not admin and "--no-elevate" not in argv and _relaunch_elevated(argv):
+        return 0              # the elevated copy takes over after the UAC prompt
+    diag.setup()              # after the hand-over, so only the copy that keeps running owns the log
+    diag.install_qt_handler()
+    diag.log_header(settings, elevated=admin, mode="dry run" if settings.dry_run else "real")
+
     if IS_WINDOWS:
-        admin = _is_admin()
-        if not admin and "--no-elevate" not in argv and _relaunch_elevated(argv):
-            return 0          # the elevated copy takes over after the UAC prompt
         from .backends.windows import WindowsBackend
         backend = WindowsBackend(
             lambda: settings.get_fixed_password() if settings.password_mode == "fixed" and settings.fixed_password_enc else "",
