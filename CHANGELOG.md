@@ -2,9 +2,14 @@
 
 What changed for people using the app. The notes on each GitHub release repeat the matching section.
 
-## 0.1.2
+## 0.2.0
 
 - Fixed: switching to Simulator mode (or back) while the first real scan was still running made the new view wait for the old scan, so the simulator showed no ports until that scan finished. The old scan is now ignored.
+- README: a new "Get started" section at the top with the three steps (install 64-bit Python for all users, download, double-click `run_usblockbox.bat`), a picture of the steps, and a note on what to expect on first start.
+- Docs: the README lists `data\logs` in "Where things are stored" and warns that a diagnostics file holds drive serial numbers and your Windows user and PC name, so send it privately rather than posting it in a public issue. SECURITY.md describes what the logs contain. RELEASING.md now says to tag the commit that holds the version bump and how to recover from a failed release run.
+
+## 0.1.2
+
 - The launcher files are now `run_usblockbox.bat` and `run_usblockbox.py` (they were `run_station.*`). **Because of this, 0.1.0 and 0.1.1 cannot update themselves to this version: download the zip from the release page instead.**
 - Wording: the old "station" terms are gone. Messages say "the fixed password" and "this computer", and the PDF record is titled "USB Lockbox Drive Record".
 - Times in the batch view say "just now" instead of "under 1 min ago".

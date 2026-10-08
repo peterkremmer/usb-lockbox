@@ -117,6 +117,7 @@ Everything defaults to a `data` folder **next to the app** (the folder holding `
 |---|---|
 | Settings | `data/settings.json` |
 | Time estimates | `data/timings.json` |
+| Logs and diagnostics | `data/logs/` |
 | CSV log | `data/records/usblockbox_log.csv` |
 | PDFs | `data/records/pdf/` |
 | Update backups | `.update_backup/` |
@@ -169,7 +170,7 @@ Never touches boot/system/pagefile disks, non-USB buses, fixed disks (unless all
 
 ## Troubleshooting
 
-**Logs.** The app keeps a small log in `data\logs`: `usblockbox.log` (what the app did and how long each step took), `crash.log` (hard crashes) and `launcher.log` (what the launcher check found). The log rotates at 1 MB, keeps 5 files and deletes files older than 30 days, so it cannot grow without limit. It never contains passwords or recovery keys. When something goes wrong, click **Diagnostics > Save diagnostics for support...** in the app: it zips the logs, a copy of the settings without secrets and a short summary into one file in that folder. Send that file. Drive records are not included. **Diagnostics > Open logs folder** opens the folder. The window shows "Scanning USB ports..." while the first scan runs, and after 45 seconds says the PC is slow to answer.
+**Logs.** The app keeps a small log in `data\logs`: `usblockbox.log` (what the app did and how long each step took), `crash.log` (hard crashes) and `launcher.log` (what the launcher check found). The log rotates at 1 MB, keeps 5 files and deletes files older than 30 days, so it cannot grow without limit. It never contains passwords or recovery keys. When something goes wrong, click **Diagnostics > Save diagnostics for support...** in the app: it zips the logs, a copy of the settings without secrets and a short summary into one file in that folder. Send that file. Drive records are not included, but the log does contain drive serial numbers, drive models and your Windows user and PC name, so send it to me privately and do not attach it to a public issue. **Diagnostics > Open logs folder** opens the folder. The window shows "Scanning USB ports..." while the first scan runs, and after 45 seconds says the PC is slow to answer.
 
 If you cannot start the app, send `data\logs\launcher.log` instead.
 

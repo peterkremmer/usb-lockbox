@@ -2,19 +2,19 @@
 
 GitHub builds and publishes the release when you push a version tag (`.github/workflows/release.yml`). The in-app updater only self-installs a release that has **a zip and a SHA-256 for it**, and the workflow attaches both.
 
-1. Edit `__version__` in `usblockbox/__init__.py` (for example `"0.1.2"`).
-2. In `CHANGELOG.md`, put the notes you want shown under a heading `## 0.1.2` (just the number). Keep an empty `## Unreleased` above it.
-3. Commit and push to `master`. Wait for the **tests** run on that commit to go green (repo > Actions).
-4. Tag that commit `v0.1.2` and push the tag:
+1. Edit `__version__` in `usblockbox/__init__.py` (for example `"0.2.0"`).
+2. In `CHANGELOG.md`, put the notes you want shown under a heading `## 0.2.0` (just the number).
+3. Commit **both files** and push to `master`. Check on GitHub that `usblockbox/__init__.py` shows the new version on that commit, and wait for the **tests** run on it to go green (repo > Actions). The tag must go on this commit, not an earlier one, or the release run fails its first check (tag does not match `__version__`).
+4. Tag that commit `v0.2.0` and push the tag:
 
-       git tag v0.1.2
-       git push origin v0.1.2
+       git tag v0.2.0
+       git push origin v0.2.0
 
    (GitHub Desktop: History tab, right-click the commit, Create Tag, then Push origin.)
-5. The **release** run (repo > Actions) checks that the tag matches `__version__`, runs the tests, builds `usblockbox-0.1.2.zip` and `SHA256SUMS`, and publishes the release with the changelog section as its notes. A tag with a dash (for example `v0.2.0-rc1`) is published as a pre-release, which the updater ignores.
+5. The **release** run (repo > Actions) checks that the tag matches `__version__`, runs the tests, builds `usblockbox-0.2.0.zip` and `SHA256SUMS`, and publishes the release with the changelog section as its notes. A tag with a dash (for example `v0.2.0-rc1`) is published as a pre-release, which the updater ignores.
 6. Check it: run an older copy and use Settings > Updates > Check now.
 
-If the release run fails, nothing is published. Fix the cause, delete the tag (`git tag -d v0.1.2; git push origin :refs/tags/v0.1.2`), and tag again.
+If the release run fails, nothing is published. Open the failed job and read the first red step. Fix the cause and commit it. Then remove the old tag in both places and tag the new commit again: locally with `git tag -d v0.2.0` (GitHub Desktop: History, right-click the commit, Delete Tag) and on GitHub with `git push origin :refs/tags/v0.2.0` or from the repo's **Tags** page. Re-running the job does not help, because it reuses the old commit. Never move or reuse a tag whose release was published; bump the version instead.
 
 ## Doing it by hand (fallback)
 

@@ -10,6 +10,7 @@ Please use GitHub's **private vulnerability reporting** on the repository (Secur
 
 * `data/settings.json`: settings. The fixed password is stored encrypted with Windows DPAPI for the **current Windows account** (a different account, or a different PC, cannot read it). On non-Windows development machines the "encryption" is only base64: the simulator is the only mode there.
 * `data/records/`: the CSV and per-drive PDFs. The PDF includes the password and recovery key by default; the CSV does not. Treat both folders as sensitive either way (serial numbers, operator and computer names).
+* `data/logs/`: a rotating troubleshooting log (1 MB, 5 files, 30 days), a crash log and a launcher log. They record what the app did and how long each step took, including drive serial numbers and models and the Windows user and PC name. They never contain passwords or recovery keys, drive file names or the contents of a record. **Diagnostics > Save diagnostics for support...** zips the logs, a copy of the settings without secrets and a short summary into one file in that folder; the app never sends it anywhere, you choose whether to send it.
 * Nothing is sent anywhere except the optional update check (an HTTPS request to GitHub).
 
 ## Design points
@@ -26,6 +27,5 @@ Please use GitHub's **private vulnerability reporting** on the repository (Secur
 * **The CSV hash chain is tamper-evident for accidents, not tamper-proof**: it is unkeyed, so someone who deliberately edits and recomputes it is not detected. Ship the log somewhere append-only if you need that.
 * The fixed-password mode means one leaked password opens every drive that used it. Prefer `generated`.
 * Endpoint-security software may flag raw disk writes. That is expected.
-* The Windows backend has not been tested on real hardware yet.
-
+* The Windows backend has so far been tried on a few USB flash drives on one Windows 11 PC and is still early (see [ISSUES.md](ISSUES.md)).
 * The fixed password ("same password for every drive") is shown in clear text in Settings, by design: every recipient is told it. It is still stored encrypted (DPAPI, current account) in `data/settings.json`.

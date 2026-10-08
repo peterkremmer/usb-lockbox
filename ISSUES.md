@@ -25,6 +25,8 @@ Known gaps and things still to verify. IDs (LB-###) are permanent so commits and
 
 ## Resolved
 
+- [x] **LB-140 Simulator showed no ports while the first real scan was still running.** Switching modes now abandons the old scan instead of waiting for it. Covered by the GUI smoke test.
+- [x] **LB-141 Install friction:** launcher checks Python and packages, README Get started section, diagnostics log and support file, "Scanning..." message.
 - [x] **LB-132 "Could not determine the new drive letter" on a flash drive.** A cleared drive can report MBR with one whole-disk partition, so `Initialize-Disk` and `New-Partition` fail. Partitioning now uses diskpart (clean, convert, create), formatting stops on errors, and the drive letter is assigned last. Confirmed with a full run on real hardware.
 - [x] **LB-136 Old-name leftovers removed** (launcher files, wording, PDF title). The self-update check no longer depends on a launcher file name. 0.1.0 and 0.1.1 look for the old launcher, so they need a manual download for the next release.
 - [x] **LB-137 Docs refresh:** README rewritten, CHANGELOG cut down to what changed per release.
