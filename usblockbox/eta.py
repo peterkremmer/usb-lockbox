@@ -13,8 +13,14 @@ from typing import Optional
 
 GB = 1_000_000_000
 
+# "Slower than usual" only means something once the usual has been measured a few times (one run can have been a
+# nearly empty drive, a quick format or a different port) and when the gap is large.
+MIN_RUNS_FOR_SLOW_WARNING = 3
+SLOW_FACTOR = 5
+
 # Rough first-run guesses until real rates have been measured here.
-FIXED_GUESS = {"clear": 8.0, "zero": 4.0, "partition": 25.0, "bitlocker": 15.0, "verify": 15.0, "finish": 5.0}
+FIXED_GUESS = {"clear": 8.0, "zero": 4.0, "partition": 25.0, "bitlocker": 15.0, "verify": 15.0, "finish": 5.0,
+               "encrypt_used": 20.0}   # used-space-only encryption of a freshly formatted drive: seconds, not hours
 SPGB_GUESS = {"overwrite": 40.0, "encrypt": 30.0}      # seconds per GB (overwrite: per pass)
 LONG_STEPS = tuple(SPGB_GUESS)                         # the steps that report their own progress
 
@@ -27,6 +33,13 @@ def step_key(label: str) -> str:
         if l.startswith(prefix):
             return key
     return l
+
+
+def plan_key(label: str, used_only: bool = False) -> str:
+    """The timing key of a step. Encrypting only the used space (Settings > Encryption) takes seconds on a fresh drive,
+    so it is timed as a fixed step of its own; full-volume encryption is timed per GB of the whole drive."""
+    k = step_key(label)
+    return "encrypt_used" if used_only and k == "encrypt" else k
 
 
 def fmt_duration(seconds: float) -> str:
@@ -67,6 +80,10 @@ class Timings:
         e = self.data.get(key)
         return e["v"] if e else None
 
+    def count(self, key: str) -> int:
+        e = self.data.get(key)
+        return e["n"] if e else 0
+
     def record(self, key: str, value: float) -> None:
         if not (value > 0) or value > 10 ** 7:
             return
@@ -96,21 +113,23 @@ def step_estimate(key: str, size_gb: float, passes: int, timings: Timings) -> tu
 
 
 def remaining(plan: list[str], label: str, step_frac: float, step_elapsed: float,
-              size_gb: float, passes: int, timings: Timings) -> Optional[tuple[float, bool]]:
+              size_gb: float, passes: int, timings: Timings, used_only: bool = False) -> Optional[tuple[float, bool]]:
     """Seconds left for one drive and whether the number rests on measurements. None = unknown step."""
     if label not in plan:
         return None
     i = plan.index(label)
-    key = step_key(label)
+    key = plan_key(label, used_only)
     est, measured = step_estimate(key, size_gb, passes, timings)
     f = min(max(step_frac, 0.0), 1.0)
     if key in LONG_STEPS and f >= 0.02 and step_elapsed >= 20:
         cur, cur_measured = step_elapsed * (1 - f) / f, True          # the drive's own pace, right now
-    else:
+    elif key in LONG_STEPS or f > 0:
         cur, cur_measured = est * (1 - f), measured
+    else:                                                              # a fixed step with no progress of its own: count down
+        cur, cur_measured = max(est - step_elapsed, est * 0.1), measured
     total, all_measured = cur, cur_measured
     for later in plan[i + 1:]:
-        e, m = step_estimate(step_key(later), size_gb, passes, timings)
+        e, m = step_estimate(plan_key(later, used_only), size_gb, passes, timings)
         total += e
         all_measured = all_measured and m
     return total, all_measured
@@ -124,10 +143,10 @@ def attention(*, now: float, last_progress_at: float, stall_seconds: float, key:
     if idle >= stall_seconds:
         return (f"No progress for {fmt_duration(idle)}. This drive may be failing or stuck. "
                 f"Look at it when you are back; do not unplug it while it says WORKING.")
-    typical = timings.get(key) if key in LONG_STEPS else None
+    typical = timings.get(key) if key in LONG_STEPS and timings.count(key) >= MIN_RUNS_FOR_SLOW_WARNING else None
     if typical and step_frac >= 0.05 and step_elapsed >= 120 and size_gb > 0:
         per = step_elapsed / step_frac / (size_gb * (max(passes, 1) if key == "overwrite" else 1))
-        if per > 3 * typical:
+        if per > SLOW_FACTOR * typical:
             return (f"Running about {per / typical:.0f} times slower than usual. "
                     f"This drive (or its port) may be failing.")
     if expected_total and (now - started_at) > max(2 * expected_total, expected_total + 1800):

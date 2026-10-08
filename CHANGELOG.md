@@ -2,6 +2,16 @@
 
 What changed for people using the app. The notes on each GitHub release repeat the matching section.
 
+## 0.2.1
+
+- Fixed: on a PC where Windows answers drive queries slowly, every drive could fail. The safety re-check before each step now reads only that one drive, one at a time, instead of listing all USB drives (about 90 seconds with 9 drives). A step that still times out now says so plainly and tells you the drive may be left wiped but not formatted, so process it again.
+- Fixed: drives running normally could be flagged "N times slower than usual". That warning now needs the usual speed to have been measured at least three times and a gap of more than five times.
+- Faster start on PCs with many USB drives and hubs. Hub and drive locations are read straight from Windows (PowerShell is the fallback), the port tiles appear first marked "READING DRIVES" with the time shown in the status bar, and each drive's details are read once and remembered instead of on every scan. One drive that will not answer no longer hides the others: its tile says "NOT RESPONDING" and it is tried again after 30 seconds. **Rescan** reads everything again.
+- New: a note on the tile when a large drive is connected at USB 2.0 speed (a USB 2.0 port or hub), with a rough time estimate. It never blocks anything.
+- Drive serial numbers are cleaned to printable characters, so a drive that reports a strange serial no longer shows a box or stray symbol.
+- The app now has an icon: the padlock from the README banner.
+- Diagnostics: the log shows how long each query took per drive, and `--compare-native` prints the PowerShell and direct answers side by side (locations, partitions, volumes, port speed). Reading partitions and volumes directly is available as an experiment (`USBLOCKBOX_NATIVE_DISKS=1`) and stays off until that comparison agrees on real hardware.
+
 ## 0.2.0
 
 - Fixed: switching to Simulator mode (or back) while the first real scan was still running made the new view wait for the old scan, so the simulator showed no ports until that scan finished. The old scan is now ignored.

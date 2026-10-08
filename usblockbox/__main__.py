@@ -1,4 +1,4 @@
-"""Entry point:  python -m usblockbox   (add --selftest-windows / --policy-dump / --ports-dump / --startup-timing for read-only diagnostics)."""
+"""Entry point:  python -m usblockbox   (add --selftest-windows / --policy-dump / --ports-dump / --startup-timing / --compare-native for read-only diagnostics)."""
 from __future__ import annotations
 
 import ctypes
@@ -54,6 +54,12 @@ def main(argv: list[str] | None = None) -> int:
         from .backends.windows import ports_dump
         return ports_dump()
 
+    if "--compare-native" in argv:
+        if not IS_WINDOWS:
+            print("--compare-native needs Windows.")
+            return 1
+        from .backends.windows import compare_native
+        return compare_native()
     if "--startup-timing" in argv:
         if not IS_WINDOWS:
             print("--startup-timing needs Windows.")
@@ -65,7 +71,10 @@ def main(argv: list[str] | None = None) -> int:
     from .ui.controller import Controller
     from .ui.main_window import MainWindow
 
+    from .ui.icon import app_icon, set_taskbar_identity
+    set_taskbar_identity()
     app = QApplication(sys.argv[:1])
+    app.setWindowIcon(app_icon())
     from .ui.theme import apply_tooltip_style
     apply_tooltip_style()
     settings = Settings.load()

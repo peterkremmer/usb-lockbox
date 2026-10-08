@@ -36,6 +36,9 @@ class Slot:
     processor: Optional[Processor] = None
     pdf_path: str = ""
     scanning_serial: str = ""
+    unreadable: str = ""           # a drive is in this port but could not be read (yet): says why, instead of looking empty
+    used_only: bool = False        # this run encrypts only the used space (timed as a fixed step, not per GB)
+    reading: bool = False          # the ports are known but the drives are still being read: an empty tile is not yet 'empty'
     # timing (set while processing, kept after it ends so a returning operator can see when it finished)
     plan: list = field(default_factory=list)
     size_gb: float = 0.0
@@ -68,6 +71,8 @@ class Controller(QObject):
     notice = Signal(str)              # status-bar message
     unassigned = Signal(int)          # count of drives not in a listed port
     _listed = Signal(object)          # internal: (generation, (backend, ports, drives) | Exception)
+    _ports_early = Signal(object)     # internal: (generation, backend, ports) as soon as the hub layout is known
+    _drives_ready = Signal(object)    # internal: (generation, backend, drives read so far) while a scan is still going
     _scanned = Signal(int, object, object)
     _progress = Signal(int, str, float)
     _finished = Signal(int, object, object, object, object)
@@ -95,6 +100,8 @@ class Controller(QObject):
         self._scan_warned: set[int] = set()
         self._lock = threading.Lock()
         self._listed.connect(self._on_listed)
+        self._ports_early.connect(self._on_ports_early)
+        self._drives_ready.connect(self._on_drives_ready)
         self._scanned.connect(self._on_scanned)
         self._progress.connect(self._on_progress)
         self._finished.connect(self._on_finished)
@@ -199,6 +206,9 @@ class Controller(QObject):
         for slot in self.slots:
             if slot.state not in (SlotState.EMPTY, SlotState.PROCESSING):
                 self._reset(slot)
+        forget = getattr(self.backend, "invalidate_cache", None)
+        if forget:
+            forget()                                      # read every drive's details again
         self.poll()
 
     # ------------------------------------------------------------ ports and slots
@@ -258,7 +268,17 @@ class Controller(QObject):
         def work():
             t0 = time.perf_counter()
             try:
-                drives = backend.list_usb_disks()
+                if not self.first_scan_done:
+                    # the hub layout is quick (and cached): show the port tiles now, fill in the drives as they are read
+                    early = backend.list_ports(set())
+                    if early and not self.first_scan_done:
+                        self._ports_early.emit((gen, backend, early))
+                    t0 = time.perf_counter()
+                if getattr(backend, "streams_drives", False):
+                    # drives are reported one by one as they are read, so the first can be checked while others are read
+                    drives = backend.list_usb_disks(on_ready=lambda ready: self._drives_ready.emit((gen, backend, ready)))
+                else:
+                    drives = backend.list_usb_disks()
                 t1 = time.perf_counter()
                 occupied = {d.location_path.lower() for d in drives if d.location_path}
                 ports = backend.list_ports(occupied)
@@ -270,6 +290,23 @@ class Controller(QObject):
                 self._listed.emit((gen, e))
 
         threading.Thread(target=work, daemon=True).start()
+
+    def _on_ports_early(self, message) -> None:
+        gen, backend, ports = message
+        if gen != self._poll_gen or backend is not self.backend or self.first_scan_done:
+            return
+        self._sync_ports(ports)
+        for slot in self.slots:
+            if slot.state == SlotState.EMPTY and not slot.reading:
+                slot.reading = True
+                self.slot_changed.emit(slot.index)
+        self.scan_state_changed.emit()
+
+    def _on_drives_ready(self, message) -> None:
+        gen, backend, drives = message
+        if gen != self._poll_gen or backend is not self.backend:
+            return
+        self._apply_drives(drives, final=False)
 
     def _on_listed(self, message) -> None:
         gen, result = message
@@ -293,7 +330,16 @@ class Controller(QObject):
                 diag.log.info("First scan finished in %.1f s: %d port(s) shown, %d drive(s) present",
                               self.first_scan_seconds, len(self.ports), len(drives))
                 diag.mark_startup_done()
+            for slot in self.slots:
+                if slot.reading:
+                    slot.reading = False
+                    self.slot_changed.emit(slot.index)
             self.scan_state_changed.emit()
+        self._apply_drives(drives, final=True)
+
+    def _apply_drives(self, drives: list, final: bool) -> None:
+        """Match drives to port tiles. `final` False = more drives are still being read, so a tile without a drive
+        is not 'empty' yet and nothing is treated as removed."""
         present: dict[int, DriveInfo] = {}
         unassigned = 0
         for d in drives:
@@ -302,11 +348,15 @@ class Controller(QObject):
                 unassigned += 1
             else:
                 present[idx] = d
-        self.unassigned.emit(unassigned)
+        if final:
+            self.unassigned.emit(unassigned)
+            self._mark_unreadable()
 
         for slot in self.slots:
             d = present.get(slot.index)
             if d is None:
+                if not final:
+                    continue          # this drive may simply not have been read yet
                 if slot.state in (SlotState.PROCESSING,):
                     continue          # worker will report the failure itself
                 if slot.state != SlotState.EMPTY:
@@ -327,6 +377,19 @@ class Controller(QObject):
             slot.scanning_serial = d.serial
             self.slot_changed.emit(slot.index)
             self._scan_async(slot.index, d)
+
+    def _mark_unreadable(self) -> None:
+        """Tiles whose drive is plugged in but would not answer say so (and go back to normal when it does)."""
+        try:
+            bad = {loc.lower(): why for loc, why in self.backend.unreadable_drives()}
+        except Exception as e:   # noqa: BLE001
+            diag.log.info("Could not ask which drives are unreadable: %s", e)
+            bad = {}
+        for slot in self.slots:
+            why = next((bad[p] for p in slot.paths if p in bad), "") if slot.state == SlotState.EMPTY else ""
+            if why != slot.unreadable:
+                slot.unreadable = why
+                self.slot_changed.emit(slot.index)
 
     def _reset(self, slot: Slot) -> None:
         slot.state = SlotState.EMPTY
@@ -393,7 +456,8 @@ class Controller(QObject):
         slot.started_at, slot.finished_at = now, 0.0
         slot.step_started = slot.last_progress_at = now
         slot.step_label_seen, slot.last_frac, slot.attention = "", 0.0, ""
-        rem = eta.remaining(slot.plan, slot.plan[0], 0.0, 0.0, slot.size_gb, slot.passes, self.timings)
+        slot.used_only = not s.full_volume_encryption
+        rem = eta.remaining(slot.plan, slot.plan[0], 0.0, 0.0, slot.size_gb, slot.passes, self.timings, slot.used_only)
         slot.expected_total = rem[0] if rem and rem[1] else None     # only judge "overdue" against measured numbers
         slot.state = SlotState.PROCESSING
         diag.log.info("Processing started on %s (serial %s, %.1f GB, steps: %s, dry run: %s)", slot.title,
@@ -459,7 +523,7 @@ class Controller(QObject):
         """A step just finished: remember its duration (per GB for the long ones) for future estimates."""
         if not label or label not in slot.plan or self.settings.dry_run and not self.simulator:
             return
-        key, took = eta.step_key(label), now - slot.step_started
+        key, took = eta.plan_key(label, slot.used_only), now - slot.step_started
         if key in eta.LONG_STEPS:
             if slot.size_gb <= 0:
                 return
@@ -471,12 +535,13 @@ class Controller(QObject):
         if slot.state == SlotState.PROCESSING:
             f = self._step_frac(slot)
             elapsed_step = now - slot.step_started
-            rem = eta.remaining(slot.plan, slot.step_label, f, elapsed_step, slot.size_gb, slot.passes, self.timings)
+            rem = eta.remaining(slot.plan, slot.step_label, f, elapsed_step, slot.size_gb, slot.passes, self.timings,
+                                slot.used_only)
             slot.remaining, slot.remaining_measured = (rem if rem else (None, False))
             old = slot.attention
             slot.attention = eta.attention(
                 now=now, last_progress_at=slot.last_progress_at, stall_seconds=self.settings.stall_minutes * 60,
-                key=eta.step_key(slot.step_label), size_gb=slot.size_gb, passes=slot.passes, step_frac=f,
+                key=eta.plan_key(slot.step_label, slot.used_only), size_gb=slot.size_gb, passes=slot.passes, step_frac=f,
                 step_elapsed=elapsed_step, started_at=slot.started_at, expected_total=slot.expected_total,
                 timings=self.timings)
             if slot.attention and not old:

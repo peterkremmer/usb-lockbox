@@ -132,6 +132,9 @@ _ERROR_HINTS = [
     (r"0x8031004e|0x80310|FVE_E_|group policy|policy", "BitLocker reported a policy conflict "
      "(method, protector or passphrase rule)."),
     (r"write[- ]protect|read[- ]only", "Drive or policy is making the device read-only."),
+    (r"timed out", "Windows (or security software on this PC) took too long to answer a drive query. "
+     "Nothing was lost by the timeout itself, but a drive may be left wiped and unformatted: process it again. "
+     "If it keeps happening, use Diagnostics > Save diagnostics for support and send the file."),
     (r"not supported|0x80070032", "The operation is not supported on this device or edition."),
 ]
 

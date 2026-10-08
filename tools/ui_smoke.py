@@ -177,5 +177,56 @@ assert pump(1.0, lambda: len(w3.tiles) == 4), (len(w3.tiles), "simulator ports w
 assert time.monotonic() - t0 < 1.5
 pump(3)                                              # the old scan finishes now; its answer must be ignored
 assert len(w3.tiles) == 4 and c3.first_scan_done
+# ---- ports first: the tiles appear while the drives are still being read, and say so
+class SlowDrives(SimulatedBackend):
+    name = "slow-drives"
+    def list_usb_disks(self):
+        time.sleep(2.5)
+        return super().list_usb_disks()
+
+c4 = Controller(SlowDrives(speed=4.0, port_count=3), s); w4 = MainWindow(c4, s); w4.show()
+assert pump(1.5, lambda: len(w4.tiles) == 3), len(w4.tiles)
+assert not c4.first_scan_done and w4.tiles[0].big.text() == "READING DRIVES", w4.tiles[0].big.text()
+assert getattr(w4, "empty_label", None) is None
+w4.grab().save(str(out / "9_reading_drives.png"))
+assert pump(10, lambda: c4.first_scan_done)
+assert pump(2, lambda: w4.tiles[0].big.text() == "EMPTY"), w4.tiles[0].big.text()
+# ---- drives are reported as they are read: the first is checked while the others are still being read
+class Streaming(SimulatedBackend):
+    name = "streaming"
+    streams_drives = True
+    def list_usb_disks(self, on_ready=None):
+        drives = super().list_usb_disks()
+        if on_ready and drives:
+            on_ready(drives[:1])
+            time.sleep(2.0)                               # the second drive is slow to read
+        return drives
+
+st = Streaming(speed=4.0, port_count=3)
+st.add_scenario("blank", 1); st.add_scenario("used_files", 2)
+c5 = Controller(st, s); w5 = MainWindow(c5, s); w5.show()
+assert pump(1.5, lambda: len(w5.tiles) == 3)
+assert pump(1.5, lambda: c5.slots[0].state != SlotState.EMPTY and not c5.first_scan_done), (c5.slots[0].state, c5.first_scan_done)
+assert c5.slots[1].state == SlotState.EMPTY and c5.slots[1].reading        # not "empty": still being read
+assert pump(10, lambda: c5.first_scan_done)
+assert pump(3, lambda: c5.slots[1].state != SlotState.EMPTY and not c5.slots[1].reading)
+# ---- a drive that will not answer: its tile says so instead of looking empty, and recovers
+class Stuck(SimulatedBackend):
+    name = "stuck"
+    bad = True
+    def unreadable_drives(self):
+        return [("sim-port-1", "x")] if self.bad else []
+
+stuck = Stuck(speed=4.0, port_count=3)
+c6 = Controller(stuck, s); w6 = MainWindow(c6, s); w6.show()
+assert pump(10, lambda: c6.first_scan_done)
+assert pump(3, lambda: w6.tiles[0].big.text() == "NOT RESPONDING"), w6.tiles[0].big.text()
+assert w6.tiles[1].big.text() == "EMPTY"
+stuck.bad = False
+assert pump(10, lambda: w6.tiles[0].big.text() == "EMPTY"), w6.tiles[0].big.text()
+# ---- the application icon is there and loads
+from usblockbox.ui.icon import app_icon, icon_file
+assert icon_file() is not None and not app_icon().isNull() and not win.windowIcon().isNull()
+assert 256 in [sz.width() for sz in app_icon().availableSizes()] or app_icon().availableSizes() == []
 print("pdfs:", sorted(p.name for p in (out / "pdf").glob("*.pdf")))
 print("SMOKE OK")

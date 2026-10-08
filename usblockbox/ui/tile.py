@@ -98,10 +98,18 @@ class Tile(QFrame):
                            f"QProgressBar::chunk{{background:{fg};border-radius:4px;}}")
         self.port.setText(f"{slot.title}  ·  {slot.port.where}" if slot.port.where else slot.title)
         icon, word = BIG[st]
+        reading = st == SlotState.EMPTY and getattr(slot, "reading", False)
+        unreadable = st == SlotState.EMPTY and getattr(slot, "unreadable", "")
+        if unreadable:                                       # a drive is in this port but Windows is not answering for it
+            icon, word = "⚠", "NOT RESPONDING"
+        elif reading:                                        # ports are known, drives are still being read
+            icon, word = "⌛", "READING DRIVES"
         self.icon.setText(icon)
         self.big.setText(word)
         d = slot.drive
-        self.info.setText(f"{d.model}\nS/N {d.serial}  •  {_gb(d.size_bytes)}" if d else "Insert a drive")
+        self.info.setText(f"{d.model}\nS/N {d.serial}  •  {_gb(d.size_bytes)}" if d
+                          else "A drive is plugged in here but Windows is slow to answer for it. Trying again in a moment."
+                          if unreadable else "Looking for a drive..." if reading else "Insert a drive")
         lines: list[str] = []
         if st == SlotState.PROCESSING and slot.attention:
             lines.append("⚠ " + slot.attention)
@@ -113,6 +121,8 @@ class Tile(QFrame):
         if slot.scan and st in (SlotState.NEEDS_WORK, SlotState.REJECTED):
             sev = Severity.BLOCK if st == SlotState.REJECTED else Severity.NEEDS_WORK
             lines += ["• " + f.message for f in slot.scan.findings if f.severity == sev][:5]
+        if slot.scan and st in (SlotState.NEEDS_WORK, SlotState.ALREADY_OK):
+            lines += ["⚠ " + f.message for f in slot.scan.findings if f.code == "SLOW_LINK"]
         if slot.warnings:
             lines += ["! " + w for w in slot.warnings]
         self.reasons.setText("\n".join(lines))

@@ -31,6 +31,11 @@ class Backend(ABC):
         location paths of the USB drives currently present. Read-only."""
         return []
 
+    def unreadable_drives(self) -> list[tuple[int, str]]:
+        """[(location path, why)] of drives that are plugged in but could not be read on the latest listing, so their tile
+        can say so instead of looking empty. Backends that cannot fail to read a drive return nothing."""
+        return []
+
     # ---- read-only
     @abstractmethod
     def list_usb_disks(self) -> list[DriveInfo]: ...

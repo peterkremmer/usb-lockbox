@@ -29,8 +29,12 @@ from .models import Port
 HUB_INTERFACE_GUID = "F18A0E88-C30C-11D0-8815-00A0C906BED8"      # GUID_DEVINTERFACE_USB_HUB (usbiodef.h)
 IOCTL_USB_GET_NODE_INFORMATION = 0x00220408                      # CTL_CODE(FILE_DEVICE_USB, 258, ...)
 IOCTL_USB_GET_PORT_CONNECTOR_PROPERTIES = 0x00220458             # CTL_CODE(FILE_DEVICE_USB, 278, ...), Windows 8+
+IOCTL_USB_GET_NODE_CONNECTION_INFORMATION_EX = 0x00220448        # CTL_CODE(FILE_DEVICE_USB, 274, ...): what is plugged into a port
+USB_SUPER_SPEED = 3                                              # USB_DEVICE_SPEED: 0 low, 1 full, 2 high (USB 2.0), 3 super (USB 3.x)
 
 _ROOT_RE = re.compile(r"#USBROOT\(\d+\)$", re.I)
+LOCATION_PATHS_KEY = ("a45c254e-df1c-4efd-8020-67d146a850e0", 37)      # DEVPKEY_Device_LocationPaths (devpkey.h)
+CM_RETRY_SECONDS = 120                                                 # after a failed hub read, wait this long before trying again
 
 
 # ---------------------------------------------------------------- helpers (pure)
@@ -48,11 +52,56 @@ def canonical_path(raw) -> str:
     return re.sub(r"#USBMI\(\d+\)$", "", chosen, flags=re.I)
 
 
+def parse_connection_speed(buf: bytes) -> Optional[int]:
+    """Speed of the device in a USB_NODE_CONNECTION_INFORMATION_EX answer (packed: index 4, descriptor 18, configuration
+    1, SPEED 1, is-hub 1, address 2, open pipes 4, STATUS 4). None when nothing is connected or the answer is too short."""
+    if len(buf) < 35:
+        return None
+    if struct.unpack_from("<I", buf, 31)[0] != 1:            # 1 = DeviceConnected
+        return None
+    return buf[23]
+
+
+def speed_name(speed: int) -> str:
+    return {0: "USB 1.0 (low speed)", 1: "USB 1.1 (full speed)", 2: "USB 2.0 (high speed)"}.get(
+        speed, "USB 3 or faster" if speed >= USB_SUPER_SPEED else "unknown speed")
+
+
+def port_of(location_path: str, hub_location: str) -> Optional[int]:
+    """Port number if the location path is a port of exactly this hub ("<hub location>#USB(n)"), else None."""
+    loc, pre = norm(location_path), norm(hub_location) + "#usb("
+    if hub_location and loc.startswith(pre) and loc.endswith(")") and loc[len(pre):-1].isdigit():
+        return int(loc[len(pre):-1])
+    return None
+
+
 def hub_key(path: str) -> str:
     """Normalise a hub's interface path / symbolic link so a companion link can be matched to a hub."""
     p = (path or "").strip().lower()
     p = re.sub(r"^(\\\\[?.]\\|\\\?\?\\)", "", p)
     return re.sub(r"#\{[0-9a-f-]+\}$", "", p)
+
+
+def parse_multisz(raw: bytes) -> list[str]:
+    """The strings in a Windows REG_MULTI_SZ / DEVPROP string list (UTF-16, NUL separated)."""
+    return [s for s in raw.decode("utf-16-le", "ignore").split("\x00") if s]
+
+
+def locations_plausible(paths) -> bool:
+    """True if hub location paths read natively form a proper tree: every path starts at a PCI root, root hubs end in
+    #USBROOT(n), and every other hub sits on a port (#USB(n)) of another hub we also know. Anything else is not trusted."""
+    known = {norm(p) for p in paths}
+    if not known or "" in known:
+        return False
+    for p in known:
+        if not p.startswith("pciroot("):
+            return False
+        if _ROOT_RE.search(p):
+            continue
+        base = re.sub(r"#usb\(\d+\)$", "", p)
+        if base == p or base not in known:
+            return False
+    return True
 
 
 @dataclass
@@ -69,6 +118,7 @@ class HubRaw:
     location: str = ""                           # canonical location path of the hub device
     num_ports: int = 0
     props: dict = field(default_factory=dict)    # port number -> PortProps
+    path: str = ""                               # device interface path, to open the hub again
 
     @property
     def is_root(self) -> bool:
@@ -154,19 +204,41 @@ def build_ports(hubs: list[HubRaw], occupied: set[str]) -> tuple[list[Port], str
 class PortScanner:
     """Reads the hub layout. The (slow) hub details are cached and re-read only when the set of hubs changes."""
 
-    def __init__(self, run_ps: Callable[..., str]):
+    def __init__(self, run_ps: Callable[..., str], locator: Optional[Callable[[list], dict]] = None):
         self._run_ps = run_ps
+        self._locator = locator              # reads hub location paths straight from Windows (fast); PowerShell is the fallback
         self._ids: Optional[tuple] = None
         self._hubs: list[HubRaw] = []
+        self._fail: Optional[tuple] = None   # (hub ids, retry not before, the error)
         self.last_error = ""
+        self.speed_reader: Callable[[str, int], Optional[int]] = _query_port_speed
+
+    def port_speed(self, location_path: str) -> Optional[int]:
+        """USB speed of whatever is plugged into the port this location path names, read fresh (a port's speed changes
+        with what is plugged into it). None when unknown. Never raises."""
+        try:
+            for h in list(self._hubs):
+                n = port_of(location_path, h.location)
+                if n and h.path:
+                    return self.speed_reader(h.path, n)
+        except Exception as e:   # noqa: BLE001
+            diag.log.info("Could not read the connection speed of %s: %s", location_path, e)
+        return None
 
     def hubs(self) -> list[HubRaw]:
         with diag.timed("find USB hubs"):
             found = _enumerate_hub_interfaces()
         ids = tuple(sorted(i for i, _p in found))
         if ids != self._ids:
-            with diag.timed("read %d USB hub(s)" % len(found)):
-                self._hubs = self._read(found)
+            if self._fail and self._fail[0] == ids and time.monotonic() < self._fail[1]:
+                raise self._fail[2]          # a failed (slow) read is not repeated on every scan
+            try:
+                with diag.timed("read %d USB hub(s)" % len(found)):
+                    self._hubs = self._read(found)
+            except Exception as e:   # noqa: BLE001
+                self._fail = (ids, time.monotonic() + CM_RETRY_SECONDS, e)
+                raise
+            self._fail = None
             self._ids = ids
         return self._hubs
 
@@ -194,14 +266,32 @@ class PortScanner:
                 continue
             finally:
                 slowest = max(slowest, (time.perf_counter() - t0, instance_id))
-            hubs.append(HubRaw(hub_key(path), instance_id, "", n, props))
+            hubs.append(HubRaw(hub_key(path), instance_id, "", n, props, path))
         if found:
             diag.note("slowest single hub (%s)" % slowest[1], slowest[0])
         if hubs:
-            paths = self._locations([h.instance_id for h in hubs])
+            ids = [h.instance_id for h in hubs]
+            paths = self._native_locations(ids) or self._locations(ids)
             for h in hubs:
                 h.location = paths.get(h.instance_id.lower(), "")
         return hubs
+
+    def _native_locations(self, instance_ids: list[str]) -> dict[str, str]:
+        """Location paths asked of Windows directly. {} (so PowerShell is used) unless every hub answered and the
+        answers form a sensible tree."""
+        if not self._locator:
+            return {}
+        try:
+            with diag.timed("hub location paths (native)"):
+                got = self._locator(instance_ids)
+            wanted = [i.lower() for i in instance_ids]
+            if all(got.get(i) for i in wanted) and locations_plausible([got[i] for i in wanted]):
+                return got
+            diag.log.warning("Native hub locations were incomplete or not a tree (%d of %d); using PowerShell",
+                             sum(1 for i in wanted if got.get(i)), len(wanted))
+        except Exception as e:   # noqa: BLE001
+            diag.log.warning("Native hub location lookup failed (%s: %s); using PowerShell", type(e).__name__, e)
+        return {}
 
     def _locations(self, instance_ids: list[str]) -> dict[str, str]:
         """{lower-case instance id: canonical location path}: one PowerShell call for all hubs."""
@@ -215,6 +305,92 @@ class PortScanner:
             {"USBLOCKBOX_IDS": json.dumps(instance_ids)}, 60)
         rows = json.loads(out) if out.strip() else []
         return {str(r.get("Id", "")).lower(): canonical_path(r.get("Paths") or []) for r in rows if isinstance(r, dict)}
+
+
+_CM = None
+
+
+def _cm():
+    """cfgmgr32 with typed signatures (loaded once). Windows only."""
+    global _CM
+    if _CM is None:
+        import ctypes
+        import uuid
+        from ctypes import wintypes as w
+
+        class GUID(ctypes.Structure):
+            _fields_ = [("Data1", w.DWORD), ("Data2", w.WORD), ("Data3", w.WORD), ("Data4", ctypes.c_ubyte * 8)]
+
+        class DEVPROPKEY(ctypes.Structure):
+            _fields_ = [("fmtid", GUID), ("pid", w.ULONG)]
+
+        cfg = ctypes.WinDLL("cfgmgr32", use_last_error=True)
+        cfg.CM_Locate_DevNodeW.argtypes = [ctypes.POINTER(w.DWORD), w.LPCWSTR, w.ULONG]
+        cfg.CM_Locate_DevNodeW.restype = w.DWORD
+        cfg.CM_Get_Parent.argtypes = [ctypes.POINTER(w.DWORD), w.DWORD, w.ULONG]
+        cfg.CM_Get_Parent.restype = w.DWORD
+        cfg.CM_Get_Device_IDW.argtypes = [w.DWORD, w.LPWSTR, w.ULONG, w.ULONG]
+        cfg.CM_Get_Device_IDW.restype = w.DWORD
+        cfg.CM_Get_DevNode_PropertyW.argtypes = [w.DWORD, ctypes.POINTER(DEVPROPKEY), ctypes.POINTER(w.ULONG),
+                                                 ctypes.c_void_p, ctypes.POINTER(w.ULONG), w.ULONG]
+        cfg.CM_Get_DevNode_PropertyW.restype = w.DWORD
+        key = DEVPROPKEY()
+        key.fmtid = GUID.from_buffer_copy(uuid.UUID(LOCATION_PATHS_KEY[0]).bytes_le)
+        key.pid = LOCATION_PATHS_KEY[1]
+        _CM = (cfg, key)
+    return _CM
+
+
+def _location_paths(instance_id: str, of_parent: bool = False) -> tuple[str, list[str]]:
+    """(instance id of the device read, its location paths). With of_parent, reads the parent device instead:
+    this is what Get-PnpDeviceProperty -KeyName DEVPKEY_Device_LocationPaths does, minus PowerShell. Windows only."""
+    import ctypes
+    from ctypes import wintypes as w
+    cfg, key = _cm()
+    dev = w.DWORD(0)
+    cr = cfg.CM_Locate_DevNodeW(ctypes.byref(dev), instance_id, 0)
+    if cr:
+        raise OSError(f"CM_Locate_DevNode failed ({cr:#x}) for {instance_id}")
+    read_id = instance_id
+    if of_parent:
+        par = w.DWORD(0)
+        cr = cfg.CM_Get_Parent(ctypes.byref(par), dev.value, 0)
+        if cr:
+            raise OSError(f"CM_Get_Parent failed ({cr:#x}) for {instance_id}")
+        dev = par
+        idbuf = ctypes.create_unicode_buffer(512)
+        if cfg.CM_Get_Device_IDW(dev.value, idbuf, 512, 0) == 0:
+            read_id = idbuf.value
+    size = w.ULONG(2048)
+    for _try in range(2):
+        buf = ctypes.create_string_buffer(size.value)
+        ptype = w.ULONG(0)
+        cr = cfg.CM_Get_DevNode_PropertyW(dev.value, ctypes.byref(key), ctypes.byref(ptype), buf, ctypes.byref(size), 0)
+        if cr == 0x1A:                       # CR_BUFFER_SMALL: size now holds the size needed
+            continue
+        break
+    if cr:
+        raise OSError(f"CM_Get_DevNode_Property failed ({cr:#x}) for {read_id}")
+    return read_id, parse_multisz(buf.raw[:size.value])
+
+
+def native_hub_locations(instance_ids: list[str]) -> dict[str, str]:
+    """{lower-case hub instance id: canonical location path}, read from Windows directly (milliseconds)."""
+    out: dict[str, str] = {}
+    for i in instance_ids:
+        try:
+            out[i.lower()] = canonical_path(_location_paths(i)[1])
+        except OSError as e:
+            diag.log.info("No native location for hub %s: %s", i, e)
+    return out
+
+
+def native_disk_location(pnp_id: str) -> tuple[str, str]:
+    """(canonical location path, "VVVV:PPPP") of the USB device a disk hangs off: the disk's parent device.
+    The same two answers the PowerShell script gave. Windows only."""
+    parent_id, paths = _location_paths(pnp_id, of_parent=True)
+    m = re.search(r"VID_([0-9A-F]{4})&PID_([0-9A-F]{4})", parent_id, re.I)
+    return canonical_path(paths), (m.group(1) + ":" + m.group(2)) if m else ""
 
 
 def _enumerate_hub_interfaces() -> list[tuple[str, str]]:
@@ -320,6 +496,34 @@ def _query_hub(path: str) -> tuple[int, dict]:
             name = b.raw[16:16 + chars * 2].decode("utf-16-le", "ignore").split("\x00")[0]
             props[n] = PortProps(bool(flags & 1), comp_port, hub_key(name) if name else "")
         return ports, props
+    finally:
+        k32.CloseHandle(h)
+
+
+def _query_port_speed(path: str, port: int) -> Optional[int]:
+    """Speed of the device plugged into `port` of the hub at this interface path. Windows only. UNVERIFIED on real
+    hardware: `--compare-native` prints it for every drive."""
+    import ctypes
+    from ctypes import wintypes as w
+
+    k32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    k32.CreateFileW.restype = ctypes.c_void_p
+    k32.CreateFileW.argtypes = [w.LPCWSTR, w.DWORD, w.DWORD, ctypes.c_void_p, w.DWORD, w.DWORD, ctypes.c_void_p]
+    k32.DeviceIoControl.argtypes = [ctypes.c_void_p, w.DWORD, ctypes.c_void_p, w.DWORD, ctypes.c_void_p, w.DWORD,
+                                    ctypes.POINTER(w.DWORD), ctypes.c_void_p]
+    k32.DeviceIoControl.restype = w.BOOL
+    k32.CloseHandle.argtypes = [ctypes.c_void_p]
+    h = k32.CreateFileW(path, 0x40000000, 0x2, None, 0x3, 0, None)       # GENERIC_WRITE, FILE_SHARE_WRITE, OPEN_EXISTING
+    if h in (None, ctypes.c_void_p(-1).value):
+        raise OSError(f"cannot open hub ({ctypes.get_last_error()})")
+    try:
+        b = ctypes.create_string_buffer(1024)
+        struct.pack_into("<I", b, 0, port)
+        got = w.DWORD(0)
+        if not k32.DeviceIoControl(h, IOCTL_USB_GET_NODE_CONNECTION_INFORMATION_EX, b, len(b), b, len(b),
+                                   ctypes.byref(got), None):
+            raise OSError(f"connection information failed ({ctypes.get_last_error()})")
+        return parse_connection_speed(b.raw)
     finally:
         k32.CloseHandle(h)
 

@@ -59,7 +59,7 @@ A batch in progress. Each tile shows when it started, how long it has run, about
 
 ![A batch in progress](docs/images/screenshot-working.png)
 
-A drive that stalls or runs far slower than usual turns amber and is named in the strip, so someone returning to the PC sees it at once:
+A drive that stalls or runs far slower than usual (once the usual speed has been measured a few times) turns amber and is named in the strip, so someone returning to the PC sees it at once:
 
 ![A drive that needs a look](docs/images/screenshot-needs-a-look.png)
 
@@ -100,6 +100,7 @@ Click **Simulator mode** in the toolbar. The window turns orange, and a pinned p
 | Color | Text | Meaning |
 |---|---|---|
 | Grey | EMPTY | Nothing in the port |
+| Grey | NOT RESPONDING | A drive is plugged in but Windows is slow to answer for it; it is tried again every 30 seconds |
 | Blue | CHECKING | Read-only scan running |
 | Amber | CLICK TO PROCESS | Needs work; reasons listed on the tile |
 | Purple | WORKING - DO NOT REMOVE | Wiping / encrypting (progress bar, time left) |
@@ -164,6 +165,7 @@ Never touches boot/system/pagefile disks, non-USB buses, fixed disks (unless all
 
 * An overwrite on flash media is NIST 800-88 **Clear**, not Purge. The record says so. Drives with unknown history are flagged for Destroy or documented risk acceptance if they held regulated or sensitive data.
 * "Already compliant" drives are re-processed by default (empty is not proof of clean). Opt in to skipping them under Settings > Safety.
+* Large drives on a USB 2.0 port or hub are slow (about 30 MB/s): a 256 GB drive can need hours per pass. The tile says so when it sees one. Use a USB 3 port or hub.
 * Time estimates are estimates. USB drives do not report health data the way hard disks do, so slow or stalled drives are caught by timing only.
 * Some Windows behaviours are not yet checked on other PCs and editions (GPO/Intune value names, DPAPI when the elevated process runs as a different account, and others). They are listed in [ISSUES.md](ISSUES.md).
 * The capacity (counterfeit-drive) test is not implemented.
@@ -174,12 +176,13 @@ Never touches boot/system/pagefile disks, non-USB buses, fixed disks (unless all
 
 If you cannot start the app, send `data\logs\launcher.log` instead.
 
-You normally do not need these. If you are asked for more detail, four read-only diagnostics print what the app sees (remove anything you do not want to share before sending the output):
+You normally do not need these. If you are asked for more detail, five read-only diagnostics print what the app sees (remove anything you do not want to share before sending the output):
 
     py -m usblockbox --ports-dump        USB hubs, ports and which drive is on which port
     py -m usblockbox --selftest-windows  disks, serials, partitions and BitLocker state (run elevated)
     py -m usblockbox --policy-dump       the BitLocker policy settings it found
     py -m usblockbox --startup-timing    how long each step of the first scan takes (run from an administrator prompt)
+    py -m usblockbox --compare-native    hub and drive locations, partitions, volumes and port speed read two ways, side by side (run elevated)
 
 `--startup-timing` shows which step of the first scan is slow, for example PowerShell start-up, one USB hub, or the disk listing. The saved diagnostics file already contains the same timings.
 

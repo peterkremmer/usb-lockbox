@@ -60,6 +60,13 @@ class BitLockerInfo:
     unlocked_with_fixed_password: bool = False
 
 
+def clean_serial(raw) -> str:
+    """A serial number fit to show and to record: printable ASCII only. Some drives report padding, control characters
+    or text in another encoding, which showed up as a box or a stray symbol."""
+    s = "".join(ch for ch in str(raw or "") if " " <= ch <= "~")
+    return s.strip()
+
+
 @dataclass
 class DriveInfo:
     disk_number: int
@@ -84,6 +91,7 @@ class DriveInfo:
     hardware_encrypted_suspected: bool = False
     lun_count: int = 1
     capacity_mismatch: bool = False   # set by optional capacity test
+    link_speed: int = -1           # USB speed of the connection: 0 low, 1 full, 2 high (USB 2.0), 3+ SuperSpeed; -1 = unknown
 
     @property
     def size_gb(self) -> float:

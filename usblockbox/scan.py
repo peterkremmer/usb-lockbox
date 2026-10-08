@@ -9,6 +9,22 @@ from .safety import eligibility_findings
 
 BASIC_TYPES = {"basic", "microsoft basic data", "exfat", "ntfs", "fat32"}
 RESERVED_MAX = 32 * 1024 * 1024   # Microsoft Reserved partition size tolerated on GPT
+USB2_GB_PER_SECOND = 0.030        # what a USB 2.0 connection really moves (about 30 MB/s), not the 480 Mbit/s on the box
+SLOW_LINK_HOURS = 1.0             # warn when writing the drive once would take longer than this at that speed
+
+
+def slow_link_finding(drive: DriveInfo, passes: int) -> Optional[Finding]:
+    """A note (never a block) when a big drive sits on a USB 2.0 port or hub: overwriting it will take hours."""
+    if not (0 <= drive.link_speed < 3) or drive.size_gb <= 0:
+        return None
+    writes = max(passes, 0) + 1                    # the overwrite passes plus the encryption write
+    hours = drive.size_gb / USB2_GB_PER_SECOND / 3600
+    if hours < SLOW_LINK_HOURS:
+        return None
+    total = hours * writes
+    return Finding("SLOW_LINK", Severity.INFO,
+                   f"This {drive.size_gb:.0f} GB drive is connected at USB 2.0 speed (a USB 2.0 port or hub). Each full "
+                   f"write takes about {hours:.1f} h, so expect roughly {total:.0f} h in all. A USB 3 port or hub is much faster.")
 
 
 def _history_ok(history: list[dict]) -> bool:
@@ -68,6 +84,10 @@ def scan_drive(drive: DriveInfo, settings: Settings, system_disks: set[int],
         else:
             enc_ok = True
             add(Finding("ENC_OK", Severity.INFO, f"Encrypted with {method_label(target)}, fully encrypted, the fixed password opens it."))
+
+    slow = slow_link_finding(drive, settings.overwrite_passes)
+    if slow:
+        add(slow)
 
     # ---- 4. content
     files = drive.total_files

@@ -62,10 +62,29 @@ def test_attention_flags_a_stall_but_not_a_short_pause():
 
 
 def test_attention_flags_a_drive_much_slower_than_usual():
-    t = Timings(); t.record("encrypt", 10.0)                     # usually 10 s per GB
+    t = Timings()
+    for _ in range(3):
+        t.record("encrypt", 10.0)                                # usually 10 s per GB, measured three times
     msg = _att(timings=t, step_frac=0.1, step_elapsed=1200.0)    # 1200 s for 3.2 GB = 375 s/GB
     assert "slower than usual" in msg
     assert _att(timings=t, step_frac=0.5, step_elapsed=200.0) == ""
+
+
+def test_no_slow_warning_from_a_single_measured_run():
+    t = Timings(); t.record("encrypt", 1.7)                      # one earlier run, maybe a nearly empty drive
+    assert t.count("encrypt") == 1
+    assert _att(timings=t, step_frac=0.5, step_elapsed=1500.0) == ""     # 94 s/GB would be 55x "slower" than that one run
+    for _ in range(2):
+        t.record("encrypt", 1.7)
+    assert "slower than usual" in _att(timings=t, step_frac=0.5, step_elapsed=1500.0)
+
+
+def test_slow_warning_needs_a_big_gap():
+    t = Timings()
+    for _ in range(3):
+        t.record("encrypt", 10.0)
+    assert _att(timings=t, step_frac=0.5, step_elapsed=800.0) == ""      # 50 s/GB = 5x exactly: not past the cutoff
+    assert "slower than usual" in _att(timings=t, step_frac=0.5, step_elapsed=900.0)
 
 
 def test_attention_flags_overdue_only_against_a_known_expectation():

@@ -23,9 +23,9 @@ import threading
 import time
 from typing import Optional
 
-from .. import diag, usbports
+from .. import diag, nativedisk, usbports
 from ..junk import junk_label
-from ..models import BitLockerInfo, DriveInfo, PartitionInfo, Port, VolumeInfo
+from ..models import BitLockerInfo, DriveInfo, PartitionInfo, Port, VolumeInfo, clean_serial
 from .base import Backend, BackendError, Cancelled, CancelCheck, Progress
 
 CHUNK = 4 * 1024 * 1024
@@ -67,6 +67,29 @@ def run_ps(script: str, env_extra: Optional[dict] = None, timeout: int = 120, la
     return p.stdout
 
 
+def _log_query_times(r: dict) -> None:
+    """Per-drive timings reported by the listing script (milliseconds), so a slow query can be named."""
+    try:
+        t = str(r.get("T") or "")
+        ms = [int(x) for x in re.findall(r"=(\d+)", t)]
+        if not diag.startup_done():
+            diag.log.info("Disk %s query times (ms): %s", r.get("Number"), t)
+        elif ms and sum(ms) >= diag.SLOW_SECONDS * 1000:
+            diag.log.warning("SLOW: disk %s query times (ms): %s", r.get("Number"), t)
+    except Exception:   # noqa: BLE001
+        pass
+
+
+def pnp_id_from_disk_path(path: str) -> str:
+    """The device instance id a Get-Disk Path stands for, e.g. a path like
+    //?/usbstor#disk&ven_x&prod_y&rev_1#0123&0#{guid} becomes USBSTOR/DISK&VEN_X&PROD_Y&REV_1/0123&0 (with backslashes).
+    Empty when the path is not in that form."""
+    p = re.sub(r"^\\\\[?.]\\", "", (path or "").strip())
+    p = re.sub(r"#\{[0-9a-fA-F-]+\}$", "", p)
+    parts = p.split("#")
+    return "\\".join(parts).upper() if len(parts) == 3 else ""
+
+
 def _json(text: str):
     text = text.strip()
     return json.loads(text) if text else None
@@ -79,29 +102,56 @@ def _as_list(x):
 _LIST_SCRIPT = r"""
 $ErrorActionPreference='Stop'
 $out=@()
-foreach($d in (Get-Disk | Where-Object { $_.BusType -eq 'USB' })){
+$only=$env:USBLOCKBOX_DISK
+$disks=if($only){ @(Get-Disk -Number ([int]$only) -ErrorAction SilentlyContinue | Where-Object { $_.BusType -eq 'USB' }) } else { @(Get-Disk | Where-Object { $_.BusType -eq 'USB' }) }
+foreach($d in $disks){
   $n=$d.Number
-  $wmi=Get-CimInstance Win32_DiskDrive | Where-Object { $_.Index -eq $n }
-  $parts=@(Get-Partition -DiskNumber $n -ErrorAction SilentlyContinue | ForEach-Object {
-    [pscustomobject]@{Number=$_.PartitionNumber;Type=[string]$_.Type;Size=[int64]$_.Size;Active=[bool]$_.IsActive;Hidden=[bool]$_.IsHidden;Letter=[string]$_.DriveLetter}})
-  $vols=@(Get-Partition -DiskNumber $n -ErrorAction SilentlyContinue | Where-Object {$_.DriveLetter} | ForEach-Object {
-    $v=Get-Volume -DriveLetter $_.DriveLetter -ErrorAction SilentlyContinue
-    [pscustomobject]@{Letter=[string]$_.DriveLetter;FS=[string]$v.FileSystem;Label=[string]$v.FileSystemLabel;Size=[int64]$v.Size;Free=[int64]$v.SizeRemaining}})
-  $loc='';$vidpid=''
-  try{
-    $pnp=$wmi.PNPDeviceID
-    $parent=(Get-PnpDeviceProperty -InstanceId $pnp -KeyName 'DEVPKEY_Device_Parent').Data
-    $loc=((Get-PnpDeviceProperty -InstanceId $parent -KeyName 'DEVPKEY_Device_LocationPaths').Data) -join ';'
-    if($parent -match 'VID_([0-9A-F]{4})&PID_([0-9A-F]{4})'){ $vidpid=$matches[1]+':'+$matches[2] }
-  }catch{}
+  $sw=[Diagnostics.Stopwatch]::StartNew()
+  $wmi=Get-CimInstance Win32_DiskDrive -Filter "Index=$n"
+  $m1=$sw.ElapsedMilliseconds
+  $parts=@();$vols=@()
+  if(-not $env:USBLOCKBOX_NOPARTS){
+    $allp=@(Get-Partition -DiskNumber $n -ErrorAction SilentlyContinue)
+    $parts=@($allp | ForEach-Object {
+      [pscustomobject]@{Number=$_.PartitionNumber;Type=[string]$_.Type;Size=[int64]$_.Size;Active=[bool]$_.IsActive;Hidden=[bool]$_.IsHidden;Letter=[string]$_.DriveLetter}})
+    $vols=@($allp | Where-Object {$_.DriveLetter} | ForEach-Object {
+      $v=Get-Volume -DriveLetter $_.DriveLetter -ErrorAction SilentlyContinue
+      [pscustomobject]@{Letter=[string]$_.DriveLetter;FS=[string]$v.FileSystem;Label=[string]$v.FileSystemLabel;Size=[int64]$v.Size;Free=[int64]$v.SizeRemaining}})
+  }
+  $m2=$sw.ElapsedMilliseconds
+  $loc='';$vidpid='';$pnp=[string]$wmi.PNPDeviceID
+  if(-not $env:USBLOCKBOX_NOPNP){
+    try{
+      $parent=(Get-PnpDeviceProperty -InstanceId $pnp -KeyName 'DEVPKEY_Device_Parent').Data
+      $loc=((Get-PnpDeviceProperty -InstanceId $parent -KeyName 'DEVPKEY_Device_LocationPaths').Data) -join ';'
+      if($parent -match 'VID_([0-9A-F]{4})&PID_([0-9A-F]{4})'){ $vidpid=$matches[1]+':'+$matches[2] }
+    }catch{}
+  }
+  $m3=$sw.ElapsedMilliseconds
   $out+=[pscustomobject]@{
     Number=$n;UniqueId=[string]$d.UniqueId;Serial=([string]$d.SerialNumber).Trim();Model=[string]$d.FriendlyName
     Firmware=[string]$d.FirmwareVersion;Size=[int64]$d.Size;Bus=[string]$d.BusType;IsSystem=[bool]$d.IsSystem
     IsBoot=[bool]$d.IsBoot;ReadOnly=[bool]$d.IsReadOnly;Style=[string]$d.PartitionStyle
-    Media=[string]$wmi.MediaType;Location=$loc;VidPid=$vidpid;Parts=$parts;Vols=$vols}
+    Media=[string]$wmi.MediaType;Location=$loc;VidPid=$vidpid;PnpId=$pnp;Parts=$parts;Vols=$vols
+    T=('cim={0} partitions+volumes={1} pnp={2}' -f $m1,($m2-$m1),($m3-$m2))}
 }
 ConvertTo-Json -InputObject @($out) -Depth 6
 """
+
+# Who is plugged in right now: one cheap call. Everything slow (partitions, volumes, BitLocker, files) is read once per
+# drive and remembered, instead of for every drive on every poll.
+_QUICK_SCRIPT = r"""
+$ErrorActionPreference='Stop'
+$out=@()
+foreach($d in @(Get-Disk | Where-Object { $_.BusType -eq 'USB' })){
+  $out+=[pscustomobject]@{Number=$d.Number;UniqueId=[string]$d.UniqueId;Serial=([string]$d.SerialNumber).Trim();Size=[int64]$d.Size;Path=[string]$d.Path}
+}
+ConvertTo-Json -InputObject @($out) -Depth 3
+"""
+
+DETAIL_TTL = 300          # seconds a drive's details are reused (they are also dropped the moment the drive is gone)
+DETAIL_WORKERS = 3        # drives read at the same time
+DETAIL_RETRY = 30         # seconds before a drive whose read failed is tried again
 
 _BL_SCRIPT = r"""
 $ErrorActionPreference='Stop'
@@ -123,7 +173,7 @@ class WindowsBackend(Backend):
             raise BackendError("The Windows backend only runs on Windows.", "PLATFORM")
         self._pw = password_getter or (lambda: "")
         self.elevated = elevated
-        self._scanner = usbports.PortScanner(run_ps)
+        self._scanner = usbports.PortScanner(run_ps, locator=usbports.native_hub_locations)
         self.ports_note = ""
 
     def list_ports(self, occupied):
@@ -132,6 +182,16 @@ class WindowsBackend(Backend):
 
     # ------------------------------------------------------------ read-only
     def system_disk_numbers(self) -> set[int]:
+        """Cached for a minute: the safety re-check asks before every step of every drive."""
+        with self._sys_lock:
+            now = time.monotonic()
+            if self._sys_cache and now - self._sys_cache[0] < 60:
+                return set(self._sys_cache[1])
+            nums = self._read_system_disks()
+            self._sys_cache = (now, set(nums))
+            return nums
+
+    def _read_system_disks(self) -> set[int]:
         out = run_ps(r"""
 $n=@(Get-Disk | Where-Object { $_.IsSystem -or $_.IsBoot } | ForEach-Object { $_.Number })
 $sd=$env:SystemDrive.Substring(0,1)
@@ -141,21 +201,159 @@ ConvertTo-Json -InputObject @($n | Select-Object -Unique)
 """, label="find system disks")
         return {int(x) for x in _as_list(_json(out))}
 
-    def list_usb_disks(self) -> list[DriveInfo]:
-        rows = _as_list(_json(run_ps(_LIST_SCRIPT, timeout=90, label="list USB disks")))
-        return [self._to_drive(r) for r in rows]
+    _native_pnp = True              # drive location paths are read from Windows directly; turned off if that finds nothing
+    _sys_cache = None               # (when, disk numbers): the system disk does not change while the app runs
+    _sys_lock = threading.Lock()
+
+    def _list_rows(self, only: Optional[int] = None) -> list[dict]:
+        """Rows from the listing script. The slow per-drive PnP property lookups are skipped and done natively."""
+        label = "list USB disks" if only is None else "check USB disk %d" % int(only)
+        env: dict = {} if only is None else {"USBLOCKBOX_DISK": str(int(only))}
+        native = self._native_pnp
+        if native:
+            env["USBLOCKBOX_NOPNP"] = "1"
+        if nativedisk.enabled():
+            env["USBLOCKBOX_NOPARTS"] = "1"
+        rows = _as_list(_json(run_ps(_LIST_SCRIPT, dict(env) or None, 90, label)))
+        if env.get("USBLOCKBOX_NOPARTS"):
+            try:
+                for r in rows:
+                    r["Style"], r["Parts"], r["Vols"] = nativedisk.native_parts_and_volumes(int(r["Number"]))
+            except Exception as e:   # noqa: BLE001 - PowerShell answers instead
+                diag.log.warning("Native partition read failed (%s: %s); using PowerShell for it", type(e).__name__, e)
+                env.pop("USBLOCKBOX_NOPARTS", None)
+                rows = _as_list(_json(run_ps(_LIST_SCRIPT, dict(env) or None, 90, label)))
+        for r in rows:
+            _log_query_times(r)
+        if native and rows:
+            found = 0
+            for r in rows:
+                try:
+                    r["Location"], r["VidPid"] = usbports.native_disk_location(str(r.get("PnpId") or ""))
+                    found += 1 if r["Location"] else 0
+                except Exception as e:   # noqa: BLE001
+                    diag.log.info("No native location for disk %s: %s", r.get("Number"), e)
+            if not found:
+                diag.log.warning("Native location lookup found nothing for %d drive(s); using PowerShell for it from now on",
+                                 len(rows))
+                self._native_pnp = False
+                env.pop("USBLOCKBOX_NOPNP", None)
+                rows = _as_list(_json(run_ps(_LIST_SCRIPT, dict(env) or None, 90, label)))
+        return rows
+
+    streams_drives = True           # list_usb_disks can report drives as they become ready (on_ready)
+    _detail_lock = threading.Lock()
+
+    def _store(self) -> tuple[dict, dict]:
+        d = self.__dict__
+        return d.setdefault("_detail", {}), d.setdefault("_detail_fail", {})
+
+    _unreadable: list = []
+
+    def unreadable_drives(self) -> list[tuple[str, str]]:
+        return list(self._unreadable)
+
+    def invalidate_cache(self) -> None:
+        """Forget what was read about each drive, so the next scan reads every drive again."""
+        with self._detail_lock:
+            for store in self._store():
+                store.clear()
+
+    def _read_detail(self, number: int) -> Optional[DriveInfo]:
+        for r in self._list_rows(number):
+            if int(r["Number"]) == number:
+                return self._to_drive(r)
+        return None                  # unplugged while we were reading
+
+    def list_usb_disks(self, on_ready=None) -> list[DriveInfo]:
+        """The USB drives plugged in now. One quick call says who is there; each drive's details are read once (a few
+        drives at a time), remembered while the same drive stays in, and reported through on_ready as they arrive."""
+        from concurrent.futures import ThreadPoolExecutor, as_completed
+        quick = _as_list(_json(run_ps(_QUICK_SCRIPT, None, 90, "list USB disk identities")))
+        wanted = {int(r["Number"]): (int(r["Number"]), str(r.get("UniqueId", "")), str(r.get("Serial", "")),
+                                     int(r.get("Size") or 0)) for r in quick}
+        pnp = {int(r["Number"]): pnp_id_from_disk_path(str(r.get("Path") or "")) for r in quick}
+        now = time.monotonic()
+        with self._detail_lock:
+            cache, failed = self._store()
+            for n in list(cache):
+                if n not in wanted or cache[n][0] != wanted[n] or now - cache[n][2] > DETAIL_TTL:
+                    del cache[n]                                  # gone, replaced by another drive, or too old
+            for n in list(failed):
+                if n not in wanted:
+                    del failed[n]
+            ready = {n: cache[n][1] for n in wanted if n in cache}
+            todo = [n for n in wanted if n not in ready and now - failed.get(n, -1e9) >= DETAIL_RETRY]
+
+        def report() -> None:
+            if on_ready:
+                try:
+                    on_ready(sorted(ready.values(), key=lambda d: d.disk_number))
+                except Exception as e:   # noqa: BLE001
+                    diag.log.warning("Reporting drives failed: %s", e)
+
+        if ready:
+            report()
+        if todo:
+            t0 = time.perf_counter()
+            with ThreadPoolExecutor(max_workers=min(DETAIL_WORKERS, len(todo))) as pool:
+                futures = {pool.submit(self._read_detail, n): n for n in todo}
+                for f in as_completed(futures):
+                    n = futures[f]
+                    try:
+                        d = f.result()
+                    except Exception as e:   # noqa: BLE001 - one drive that will not answer must not hide the others
+                        diag.log.warning("Could not read disk %d (%s: %s); trying again in %d s", n, type(e).__name__,
+                                         e, DETAIL_RETRY)
+                        with self._detail_lock:
+                            self._store()[1][n] = time.monotonic()
+                        continue
+                    if d is None:
+                        continue
+                    with self._detail_lock:
+                        cache, failed = self._store()
+                        cache[n] = (wanted[n], d, time.monotonic())
+                        failed.pop(n, None)
+                    ready[n] = d
+                    report()
+            diag.note("read details of %d drive(s), %d at a time" % (len(todo), DETAIL_WORKERS), time.perf_counter() - t0)
+        self._unreadable = self._find_unreadable(wanted, ready, pnp)
+        return sorted(ready.values(), key=lambda d: d.disk_number)
+
+    def _find_unreadable(self, wanted: dict, ready: dict, pnp: dict) -> list[tuple[str, str]]:
+        """Plugged in, but its details could not be read (yet): where it is, from Windows' own device tree."""
+        out = []
+        with self._detail_lock:
+            failed = set(self._store()[1])
+        for n in wanted:
+            if n in ready or n not in failed or not pnp.get(n):
+                continue
+            try:
+                loc = usbports.native_disk_location(pnp[n])[0]
+            except Exception as e:   # noqa: BLE001
+                diag.log.info("No location for unreadable disk %d: %s", n, e)
+                continue
+            if loc:
+                out.append((loc, "Windows is not answering for this drive"))
+        return out
+
+    _get_drive_lock = threading.Lock()
 
     def get_drive(self, disk_number: int) -> Optional[DriveInfo]:
-        # Enumerating all USB disks keeps one code path; the list is small.
-        for d in self.list_usb_disks():
-            if d.disk_number == disk_number:
-                return d
+        """One drive, read afresh. The safety re-check runs before every destructive step of every drive,
+        so this must not enumerate all USB disks (with many drives on a slow PC that took longer than the
+        timeout) and must not run for several drives at once."""
+        with self._get_drive_lock:
+            for r in self._list_rows(int(disk_number)):
+                d = self._to_drive(r)
+                if d.disk_number == disk_number:
+                    return d
         return None
 
     def _to_drive(self, r: dict) -> DriveInfo:
         model = r.get("Model") or ""
         d = DriveInfo(
-            disk_number=int(r["Number"]), unique_id=r.get("UniqueId", ""), serial=r.get("Serial", ""),
+            disk_number=int(r["Number"]), unique_id=r.get("UniqueId", ""), serial=clean_serial(r.get("Serial", "")),
             vid_pid=r.get("VidPid", ""), model=model, firmware=r.get("Firmware", ""),
             size_bytes=int(r.get("Size", 0)), bus_type=r.get("Bus", ""),
             is_removable=("removable" in (r.get("Media") or "").lower()),   # VERIFY on your drive models
@@ -163,6 +361,8 @@ ConvertTo-Json -InputObject @($n | Select-Object -Unique)
             is_read_only=bool(r.get("ReadOnly")), location_path=usbports.canonical_path(r.get("Location", "")),
             partition_style=r.get("Style", ""))
         d.hardware_encrypted_suspected = any(h in model.lower() for h in HW_ENCRYPTED_HINTS)  # VERIFY
+        speed = self._scanner.port_speed(d.location_path) if d.location_path else None
+        d.link_speed = -1 if speed is None else int(speed)
         for p in _as_list(r.get("Parts")):
             d.partitions.append(PartitionInfo(int(p["Number"]), str(p["Type"]), int(p["Size"]),
                                               bool(p["Active"]), bool(p["Hidden"])))
@@ -479,6 +679,83 @@ def ports_dump() -> int:
     occupied = {usbports.norm(d.location_path) for d in drives if d.location_path}
     print(usbports.dump(run_ps, occupied))
     return 0
+
+
+def compare_native() -> int:
+    """Read-only: ask Windows for hub and drive location paths both ways (PowerShell and directly) and print them side by
+    side with the time each took. A line that says DIFFERENT is a bug in the direct route: send the output."""
+    import time
+
+    def clock(fn):
+        t = time.perf_counter()
+        try:
+            return fn(), time.perf_counter() - t, ""
+        except Exception as e:   # noqa: BLE001
+            return None, time.perf_counter() - t, f"{type(e).__name__}: {e}"
+
+    differ = 0
+    print("Comparing location paths read through PowerShell and read directly from Windows (nothing is changed)...\n",
+          flush=True)
+    found = usbports._enumerate_hub_interfaces()
+    ids = [i for i, _p in found]
+    native, t_native, err = clock(lambda: usbports.native_hub_locations(ids))
+    ps, t_ps, err_ps = clock(lambda: usbports.PortScanner(run_ps)._locations(ids))
+    print(f"HUBS ({len(ids)}): direct {t_native:.2f} s{('  FAILED ' + err) if err else ''};  PowerShell {t_ps:.2f} s"
+          f"{('  FAILED ' + err_ps) if err_ps else ''}")
+    for i in ids:
+        a, b = (native or {}).get(i.lower(), ""), (ps or {}).get(i.lower(), "")
+        same = "same" if a == b else "DIFFERENT"
+        differ += a != b
+        print(f"  {same:9} {i}\n            direct:     {a or '(nothing)'}\n            PowerShell: {b or '(nothing)'}")
+    print(f"  tree check on the direct answers: {'ok' if usbports.locations_plausible((native or {}).values()) else 'NOT a plausible tree'}")
+    rows, t_rows, err_rows = clock(lambda: _as_list(_json(run_ps(_LIST_SCRIPT, None, 300, "compare: list USB disks"))))
+    print(f"\nDRIVES ({len(rows or [])}): PowerShell listing with its own lookup {t_rows:.2f} s"
+          f"{('  FAILED ' + err_rows) if err_rows else ''}")
+    for r in rows or []:
+        got, t_d, err_d = clock(lambda: usbports.native_disk_location(str(r.get("PnpId") or "")))
+        want = (usbports.canonical_path(r.get("Location", "")), r.get("VidPid", ""))
+        have = got or ("", "")
+        same = "same" if have == want else "DIFFERENT"
+        differ += have != want
+        print(f"  {same:9} disk {r.get('Number')}  direct {t_d * 1000:.0f} ms{('  FAILED ' + err_d) if err_d else ''}"
+              f"\n            direct:     {have[0] or '(nothing)'}  {have[1]}"
+              f"\n            PowerShell: {want[0] or '(nothing)'}  {want[1]}")
+        if r.get("T"):
+            print(f"            PowerShell query times (ms): {r['T']}")
+        differ += _compare_layout(r, clock)
+    scanner = usbports.PortScanner(run_ps, locator=usbports.native_hub_locations)
+    try:
+        scanner.hubs()
+    except Exception as e:   # noqa: BLE001
+        print(f"\n(could not read the hubs again for the speed check: {e})")
+    print("\nCONNECTION SPEED of each drive's port (read directly; USB 2.0 shows as 'high speed'):")
+    for r in rows or []:
+        loc = usbports.canonical_path(r.get("Location", ""))
+        speed, t_s, err_s = clock(lambda: scanner.port_speed(loc))
+        word = "not available" if speed is None else usbports.speed_name(speed)
+        print(f"  disk {r.get('Number')}  {word}  ({t_s * 1000:.0f} ms){('  FAILED ' + err_s) if err_s else ''}")
+    print("\nTo try the direct partition and volume reads in the app, set USBLOCKBOX_NATIVE_DISKS=1 before starting it.")
+    print(f"\n{'All answers match.' if not differ else str(differ) + ' answer(s) are DIFFERENT. Please send this output.'}")
+    return 0 if not differ else 2
+
+
+def _compare_layout(r: dict, clock) -> int:
+    """Print PowerShell's and the direct partition/volume answers for one disk. Returns 1 when they differ."""
+    got, t, err = clock(lambda: nativedisk.native_parts_and_volumes(int(r["Number"])))
+    if err or not got:
+        print(f"            partitions/volumes direct: FAILED {err}")
+        return 1
+    style, parts, vols = got
+    want_p = [(int(p["Number"]), str(p["Type"]), int(p["Size"]), bool(p["Active"]), bool(p["Hidden"]))
+              for p in _as_list(r.get("Parts"))]
+    have_p = [(p["Number"], p["Type"], p["Size"], p["Active"], p["Hidden"]) for p in parts]
+    want_v = sorted((str(v["Letter"]), str(v["FS"]), str(v["Label"]), int(v["Size"] or 0)) for v in _as_list(r.get("Vols")))
+    have_v = sorted((v["Letter"], v["FS"], v["Label"], v["Size"]) for v in vols)
+    same = (style == r.get("Style") and sorted(have_p) == sorted(want_p) and have_v == want_v)
+    print(f"  {'same' if same else 'DIFFERENT':9} partitions/volumes of disk {r.get('Number')}: direct {t * 1000:.0f} ms")
+    if not same:
+        print(f"            direct:     {style} {have_p} {have_v}\n            PowerShell: {r.get('Style')} {want_p} {want_v}")
+    return 0 if same else 1
 
 
 def startup_timing() -> int:

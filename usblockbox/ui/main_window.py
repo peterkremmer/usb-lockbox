@@ -18,6 +18,7 @@ from ..backends.simulated import SimulatedBackend
 from ..config import Settings, current_user, method_label
 from ..models import SlotState
 from .controller import Controller
+from .icon import app_icon
 from .scanning import scanning_text
 from .settings_dialog import SettingsDialog
 from .sim_panel import SIM_BG, SIM_COLOR, SimulatorPanel
@@ -51,6 +52,7 @@ class PolicyDialog(QDialog):
 class MainWindow(QMainWindow):
     def __init__(self, controller: Controller, settings: Settings):
         super().__init__()
+        self.setWindowIcon(app_icon())
         self.ctl = controller
         self.settings = settings
         self.hw_backend = controller.backend           # the computer's real USB ports (or nothing, off Windows)
@@ -268,6 +270,8 @@ class MainWindow(QMainWindow):
         label = getattr(self, "empty_label", None)
         if label is not None:
             label.setText(self._scan_text())
+        elif not self.ctl.first_scan_done and self.ctl.slots:      # port tiles are up, drives are still being read
+            self.status.showMessage("Reading drives... %d s" % int(self.ctl.scan_elapsed()), 2000)
 
     def _on_layout_changed(self) -> None:
         """The USB port list changed (hub plugged in or removed, or the mode switched): rebuild the tiles."""
