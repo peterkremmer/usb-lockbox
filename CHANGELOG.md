@@ -2,7 +2,7 @@
 
 What changed for people using the app. The notes on each GitHub release repeat the matching section.
 
-## Unreleased
+## 0.2.2
 
 - Fix: when several drives were started together, one or two could fail at "Partition and format" with "The specified disk is not convertible". That step now runs one drive at a time and retries once after refreshing Windows' disk list.
 
