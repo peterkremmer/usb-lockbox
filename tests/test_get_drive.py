@@ -175,3 +175,84 @@ def test_unreadable_drive_is_reported_with_its_location(monkeypatch):
     monkeypatch.setattr(w, "DETAIL_RETRY", 0)
     be.present.remove(2); be.list_usb_disks()
     assert be.unreadable_drives() == []                          # unplugged: no longer reported
+
+
+# ---------------------------------------------------------------- the listing must leave a disk alone while it is being processed
+def test_a_disk_being_processed_is_not_read_again(monkeypatch):
+    be, calls = _fake_world(monkeypatch, [1, 2])
+    be.list_usb_disks(); calls.clear()
+    be.hold(2)
+    be._detail[2] = ((2, "other", "s2", 0), be._detail[2][1], 0.0)     # stale and "different": would normally be re-read
+    got = be.list_usb_disks()
+    assert [d.disk_number for d in got] == [1, 2]                          # still listed, from what was already known
+    assert calls == ["list USB disk identities"]                           # but not read
+    be.release(2)
+    be.list_usb_disks()
+    assert "check USB disk 2" in calls                                     # normal again once processing ends
+
+
+def test_pipeline_holds_the_disk_while_it_runs(monkeypatch):
+    from usblockbox.backends.simulated import SimulatedBackend
+    from usblockbox.config import Settings
+    from usblockbox.pipeline import Processor
+    from usblockbox.scan import scan_drive
+    be = SimulatedBackend(speed=50.0)
+    be.add_scenario("blank", 1)
+    held = []
+    orig_hold, orig_release = be.hold, be.release
+    be.hold = lambda n: (held.append(("hold", n)), orig_hold(n))[1]
+    be.release = lambda n: (held.append(("release", n)), orig_release(n))[1]
+    s = Settings(); s.dry_run = False; s.overwrite_passes = 0; s.password_mode = "prompt"
+    drive = be.list_usb_disks()[0]
+    run = Processor(be, s).run(scan_drive(drive, s, be.system_disk_numbers()), None, lambda l, f: None, lambda: "Passw0rd!Passw0rd")
+    assert held and held[0][0] == "hold" and held[-1][0] == "release"
+
+
+def _bl(**kw):
+    base = {"Present": True, "Protected": True, "Method": "XtsAes256", "Percent": 100.0, "Locked": False,
+            "Protectors": ["Password"], "Status": "FullyEncrypted"}
+    base.update(kw)
+    return json.dumps(base)
+
+
+def _read(monkeypatch, info_json, busy=()):
+    be, _calls = _fake_world(monkeypatch, [1])
+    locks = []
+    be.verify_password = lambda d, pw: locks.append(1) or True
+    be._pw = lambda: "pw"
+    be.__dict__["_busy"] = set(busy)
+    monkeypatch.setattr(w, "run_ps", lambda *a, **k: info_json)
+    monkeypatch.setattr(w.WindowsBackend, "_count_files", staticmethod(lambda letter: (0, "")))
+    d = w.DriveInfo(1, "u", "s", volumes=[w.VolumeInfo(drive_letter="E")])
+    be._fill_bitlocker_and_files(d)
+    return be, d, locks
+
+
+def test_reading_a_drive_never_locks_or_unlocks_it(monkeypatch):
+    for info in (_bl(), _bl(Percent=42.0, Status="EncryptionInProgress"), _bl(Locked=True)):
+        _be, d, locks = _read(monkeypatch, info)
+        assert locks == [] and d.bitlocker.present                         # status only, whatever state it is in
+
+
+def test_password_is_tested_only_on_a_fully_encrypted_drive_that_is_not_being_processed(monkeypatch):
+    be, d, locks = _read(monkeypatch, _bl(Percent=42.0, Status="EncryptionInProgress"))
+    be.prove_fixed_password(d, "pw")
+    assert locks == [] and not d.bitlocker.unlocked_with_fixed_password     # still encrypting: left strictly alone
+    be, d, locks = _read(monkeypatch, _bl(Status="EncryptionSuspended"))
+    be.prove_fixed_password(d, "pw")
+    assert locks == []                                                       # paused is not finished either
+    be, d, locks = _read(monkeypatch, _bl(), busy=[1])
+    be.prove_fixed_password(d, "pw")
+    assert locks == []                                                       # this app is working on it right now
+    be, d, locks = _read(monkeypatch, _bl())
+    be.prove_fixed_password(d, "")
+    assert locks == []                                                       # no fixed password to test with
+    be.prove_fixed_password(d, "pw")
+    assert locks == [1] and d.bitlocker.unlocked_with_fixed_password
+
+
+def test_a_locked_drive_the_password_opens_gets_its_files_counted(monkeypatch):
+    be, d, locks = _read(monkeypatch, _bl(Locked=True))
+    assert d.volumes[0].file_count is None                                   # could not be counted while locked
+    be.prove_fixed_password(d, "pw")
+    assert d.bitlocker.unlocked_with_fixed_password and not d.bitlocker.locked and d.volumes[0].file_count == 0

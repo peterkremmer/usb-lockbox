@@ -114,6 +114,7 @@ class Processor:
             if self.backend.real and not self.backend.elevated:
                 raise SafetyError("Erasing needs administrator rights. Restart the app as administrator.")
 
+            self.backend.hold(drive.disk_number)          # the drive listing must leave this disk alone from here on
             guard()
             do(steps[0], lambda: (guard(), self.backend.clear_disk(drive)))
             do(steps[1], lambda: (guard(), self.backend.zero_edges(drive, s.zero_edge_mb)))
@@ -149,5 +150,7 @@ class Processor:
         except Exception as e:   # noqa: BLE001
             res.error = f"Unexpected error: {e}"
             res.outcome = "FAILED"
+        finally:
+            self.backend.release(drive.disk_number)
         res.finished = _now()
         return res

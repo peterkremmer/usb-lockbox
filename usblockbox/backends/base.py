@@ -31,6 +31,21 @@ class Backend(ABC):
         location paths of the USB drives currently present. Read-only."""
         return []
 
+    def hold(self, disk_number: int) -> None:
+        """Processing of this disk is starting: do not touch it from the read-only listing until release()."""
+
+    def release(self, disk_number: int) -> None:
+        """Processing of this disk has ended."""
+
+    def link_chain(self, drive: DriveInfo) -> list:
+        """The USB links between this drive and the computer, from its own port outward:
+        [{"kind": "drive"|"hub", "path": location path, "speed": USB speed or None}]. Empty when unknown."""
+        return []
+
+    def prove_fixed_password(self, drive: DriveInfo, password: str) -> None:
+        """Set drive.bitlocker.unlocked_with_fixed_password for an already-encrypted drive. Listing never does this,
+        because the test locks the volume. Backends whose drives already carry the answer do nothing."""
+
     def unreadable_drives(self) -> list[tuple[int, str]]:
         """[(location path, why)] of drives that are plugged in but could not be read on the latest listing, so their tile
         can say so instead of looking empty. Backends that cannot fail to read a drive return nothing."""

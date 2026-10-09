@@ -165,7 +165,7 @@ Never touches boot/system/pagefile disks, non-USB buses, fixed disks (unless all
 
 * An overwrite on flash media is NIST 800-88 **Clear**, not Purge. The record says so. Drives with unknown history are flagged for Destroy or documented risk acceptance if they held regulated or sensitive data.
 * "Already compliant" drives are re-processed by default (empty is not proof of clean). Opt in to skipping them under Settings > Safety.
-* Large drives on a USB 2.0 port or hub are slow (about 30 MB/s): a 256 GB drive can need hours per pass. The tile says so when it sees one. Use a USB 3 port or hub.
+* Drives on a USB 2.0 port or hub are slow (about 30 MB/s): a 256 GB drive can need hours per pass. The tile says so when a job would take over an hour. Drives sharing one hub also share its speed; time left accounts for that and speeds up as other drives finish. Use a USB 3 port or hub.
 * Time estimates are estimates. USB drives do not report health data the way hard disks do, so slow or stalled drives are caught by timing only.
 * Some Windows behaviours are not yet checked on other PCs and editions (GPO/Intune value names, DPAPI when the elevated process runs as a different account, and others). They are listed in [ISSUES.md](ISSUES.md).
 * The capacity (counterfeit-drive) test is not implemented.

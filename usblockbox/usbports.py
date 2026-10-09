@@ -33,6 +33,7 @@ IOCTL_USB_GET_NODE_CONNECTION_INFORMATION_EX = 0x00220448        # CTL_CODE(FILE
 USB_SUPER_SPEED = 3                                              # USB_DEVICE_SPEED: 0 low, 1 full, 2 high (USB 2.0), 3 super (USB 3.x)
 
 _ROOT_RE = re.compile(r"#USBROOT\(\d+\)$", re.I)
+_TRAIL_PORT = re.compile(r"#USB\(\d+\)$", re.I)
 LOCATION_PATHS_KEY = ("a45c254e-df1c-4efd-8020-67d146a850e0", 37)      # DEVPKEY_Device_LocationPaths (devpkey.h)
 CM_RETRY_SECONDS = 120                                                 # after a failed hub read, wait this long before trying again
 
@@ -212,6 +213,26 @@ class PortScanner:
         self._fail: Optional[tuple] = None   # (hub ids, retry not before, the error)
         self.last_error = ""
         self.speed_reader: Callable[[str, int], Optional[int]] = _query_port_speed
+
+    def link_chain(self, location_path: str) -> list[dict]:
+        """The links between a drive and the computer, from the drive's own port outward:
+        [{"kind": "drive"|"hub", "path": location path of the port, "speed": USB speed or None}]. A hub's own location
+        path is the port it is plugged into, so its uplink speed is the speed of that port. Never raises."""
+        chain: list[dict] = []
+        try:
+            hub_locations = {norm(h.location) for h in self._hubs if h.location}
+            chain.append({"kind": "drive", "path": location_path, "speed": self.port_speed(location_path)})
+            parent = _TRAIL_PORT.sub("", location_path or "") if _TRAIL_PORT.search(location_path or "") else ""
+            for _ in range(8):
+                if not parent or norm(parent) not in hub_locations:
+                    break
+                if _ROOT_RE.search(parent):                       # the computer's own root hub has no uplink
+                    break
+                chain.append({"kind": "hub", "path": parent, "speed": self.port_speed(parent)})
+                parent = _TRAIL_PORT.sub("", parent) if _TRAIL_PORT.search(parent) else ""
+        except Exception as e:   # noqa: BLE001
+            diag.log.info("Could not work out the USB links of %s: %s", location_path, e)
+        return chain
 
     def port_speed(self, location_path: str) -> Optional[int]:
         """USB speed of whatever is plugged into the port this location path names, read fresh (a port's speed changes

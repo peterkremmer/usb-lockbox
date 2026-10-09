@@ -58,6 +58,7 @@ class BitLockerInfo:
     locked: bool = False
     protector_types: list[str] = field(default_factory=list)
     unlocked_with_fixed_password: bool = False
+    fully_encrypted: bool = True           # Windows says FullyEncrypted (not converting, not suspended)
 
 
 def clean_serial(raw) -> str:
@@ -91,6 +92,7 @@ class DriveInfo:
     hardware_encrypted_suspected: bool = False
     lun_count: int = 1
     capacity_mismatch: bool = False   # set by optional capacity test
+    link_chain: list = field(default_factory=list)   # [{"kind": "drive"|"hub", "path", "speed"}] from its port outward
     link_speed: int = -1           # USB speed of the connection: 0 low, 1 full, 2 high (USB 2.0), 3+ SuperSpeed; -1 = unknown
 
     @property

@@ -76,3 +76,24 @@ def test_fixed_step_counts_down_while_it_runs():
     assert abs((start - later) - 10.0) < 1e-6
     overrun = remaining(plan, "Enable BitLocker", 0.0, 500.0, 32, 0, t)[0]
     assert overrun > 0                                                         # never negative or zero while still running
+
+
+# ---------------------------------------------------------------- progress lines in the log
+def test_progress_is_logged_on_every_whole_percent_and_as_a_heartbeat():
+    assert eta.progress_due(50, 51, 1000.0, 1001.0)                 # 50% -> 51%
+    assert not eta.progress_due(51, 51, 1000.0, 1060.0)             # same percent, a minute later: quiet
+    assert eta.progress_due(51, 51, 1000.0, 1000.0 + eta.HEARTBEAT_SECONDS)   # nothing for two minutes: say so
+
+
+def test_progress_line_has_what_is_needed_to_diagnose_a_slow_step():
+    line = eta.progress_line("PORT 3", "Encrypt", 0.51, 1200.0, 32.0, 3, False, 0.0, "S1")
+    assert line.startswith("PORT 3 (serial S1): Encrypt 51%") and "step running 20 min" in line
+    assert "average 13.6 MB/s" in line and "unchanged" not in line                # 32 GB * 0.51 / 1200 s
+    stuck = eta.progress_line("PORT 3", "Encrypt", 0.51, 1200.0, 32.0, 3, False, 600.0)
+    assert "percentage unchanged for 10 min" in stuck
+    over = eta.progress_line("PORT 2", "Overwrite (3 passes)", 0.5, 100.0, 10.0, 3, False, 0.0)
+    assert "average 150.0 MB/s" in over                                           # 10 GB * 0.5 * 3 passes in 100 s
+    fixed = eta.progress_line("PORT 2", "Partition and format", 0.0, 5.0, 10.0, 3, False, 0.0)
+    assert "average" not in fixed                                                 # fixed steps have no speed
+    used = eta.progress_line("PORT 2", "Encrypt", 0.4, 30.0, 256.0, 0, True, 0.0)
+    assert "average" not in used                                                  # used-space-only: no per-GB speed

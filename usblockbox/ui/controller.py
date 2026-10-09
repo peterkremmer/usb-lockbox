@@ -17,6 +17,7 @@ from ..pipeline import Processor, plan_steps
 from .. import policy as policy_mod
 from .. import records
 from .. import eta
+from .. import shares as shares_mod
 from ..config import Settings, settings_dir
 from ..safety import protected_paths
 
@@ -38,6 +39,12 @@ class Slot:
     scanning_serial: str = ""
     unreadable: str = ""           # a drive is in this port but could not be read (yet): says why, instead of looking empty
     used_only: bool = False        # this run encrypts only the used space (timed as a fixed step, not per GB)
+    rate_win: eta.RateWindow = field(default_factory=eta.RateWindow)   # recent progress of the current step
+    contended_step: bool = False    # the current step ran held back by a shared link: its speed says nothing about the drive
+    share_note: str = ""            # shown on the tile when several drives share a full USB link
+    log_pct: int = -1               # last whole percent of the current step that was written to the log
+    log_at: float = 0.0
+    log_label: str = ""
     reading: bool = False          # the ports are known but the drives are still being read: an empty tile is not yet 'empty'
     # timing (set while processing, kept after it ends so a returning operator can see when it finished)
     plan: list = field(default_factory=list)
@@ -110,6 +117,9 @@ class Controller(QObject):
         self._now = time.time
         self._timings_real = eta.Timings(settings_dir() / "timings.json")
         self._timings_sim = eta.Timings(None)       # the simulator's made-up speeds never pollute the real ones
+        self._shares_at = {False: -1e9, True: -1e9}       # keyed by "include drives that are still waiting"
+        self._shares_cache: dict = {False: {}, True: {}}
+        self._shares_warned = False
         self._batch_started = 0.0
         self._batch_finished_at = 0.0
         self._batch_done = 0
@@ -397,8 +407,10 @@ class Controller(QObject):
         slot.message = ""; slot.fraction = 0.0; slot.step_label = ""; slot.warnings = []
         slot.pdf_path = ""
         slot.finished_at = slot.started_at = 0.0
-        slot.attention = slot.timing_text = ""
+        slot.attention = slot.timing_text = slot.share_note = ""
         slot.remaining = None
+        slot.contended_step = False
+        slot.rate_win.reset()
         self.slot_changed.emit(slot.index)
 
     # ------------------------------------------------------------ scanning
@@ -412,6 +424,14 @@ class Controller(QObject):
         def work():
             pol = policy_mod.probe(s, pw, raw)
             hist = records.read_history(s, drive.serial)
+            try:
+                backend.prove_fixed_password(drive, pw or "")     # the only place a finished drive is locked and unlocked
+            except Exception as e:   # noqa: BLE001 - an unproven password just means the drive is treated as needing work
+                diag.log.info("Could not test the fixed password on disk %s: %s", drive.disk_number, e)
+            try:
+                drive.link_chain = backend.link_chain(drive)           # which USB links it shares, for time-left forecasts
+            except Exception as e:   # noqa: BLE001
+                diag.log.info("Could not read the USB links of disk %s: %s", drive.disk_number, e)
             res = scan_drive(drive, s, backend.system_disk_numbers(), pol, bound, hist, extra)
             self._scanned.emit(idx, res, pol)
 
@@ -457,6 +477,7 @@ class Controller(QObject):
         slot.step_started = slot.last_progress_at = now
         slot.step_label_seen, slot.last_frac, slot.attention = "", 0.0, ""
         slot.used_only = not s.full_volume_encryption
+        slot.rate_win.reset(); slot.contended_step = False; slot.share_note = ""
         rem = eta.remaining(slot.plan, slot.plan[0], 0.0, 0.0, slot.size_gb, slot.passes, self.timings, slot.used_only)
         slot.expected_total = rem[0] if rem and rem[1] else None     # only judge "overdue" against measured numbers
         slot.state = SlotState.PROCESSING
@@ -506,12 +527,34 @@ class Controller(QObject):
                           now - slot.step_started if slot.step_label_seen else 0.0)
             self._learn(slot, slot.step_label_seen, now)
             slot.step_label_seen, slot.step_started, slot.last_progress_at = label, now, now
+            slot.rate_win.reset(); slot.contended_step = False
         if frac > slot.last_frac + 0.0005:
             slot.last_progress_at = now
         slot.last_frac = max(slot.last_frac, frac)
         slot.step_label, slot.fraction = label, frac
+        if eta.plan_key(label, slot.used_only) in eta.LONG_STEPS:
+            slot.rate_win.add(now, self._step_frac(slot))
         self._update_timing(slot, now)
+        self._log_progress(slot, now)
         self.slot_changed.emit(idx)
+
+    def _log_progress(self, slot: Slot, now: float, heartbeat_only: bool = False) -> None:
+        """Write the step's percentage to the log whenever it changes (and every two minutes if it does not), so a slow or
+        stuck step can be read back from the log afterwards."""
+        if slot.state != SlotState.PROCESSING or not slot.step_label:
+            return
+        pct = int(self._step_frac(slot) * 100)
+        if slot.step_label != slot.log_label:                               # a new step: start its trail
+            slot.log_pct, slot.log_label, slot.log_at = -1, slot.step_label, 0.0
+        if heartbeat_only:
+            if now - slot.log_at < eta.HEARTBEAT_SECONDS:
+                return
+        elif not eta.progress_due(slot.log_pct, pct, slot.log_at, now):
+            return
+        slot.log_pct, slot.log_at = pct, now
+        serial = slot.drive.serial if slot.drive else ""
+        diag.log.info(eta.progress_line(slot.title, slot.step_label, pct / 100.0, now - slot.step_started, slot.size_gb,
+                                        slot.passes, slot.used_only, now - slot.last_progress_at, serial))
 
     def _step_frac(self, slot: Slot) -> float:
         if slot.step_label not in slot.plan or not slot.plan:
@@ -525,8 +568,8 @@ class Controller(QObject):
             return
         key, took = eta.plan_key(label, slot.used_only), now - slot.step_started
         if key in eta.LONG_STEPS:
-            if slot.size_gb <= 0:
-                return
+            if slot.size_gb <= 0 or slot.contended_step:
+                return                                    # a step slowed by a shared link would teach the wrong "usual" speed
             took = took / slot.size_gb / (max(slot.passes, 1) if key == "overwrite" else 1)
         self.timings.record(key, took)
 
@@ -535,15 +578,21 @@ class Controller(QObject):
         if slot.state == SlotState.PROCESSING:
             f = self._step_frac(slot)
             elapsed_step = now - slot.step_started
+            share = self._shares(now).get(slot.index)
+            long_step = eta.plan_key(slot.step_label, slot.used_only) in eta.LONG_STEPS
+            recent = slot.rate_win.rate(now) if long_step else None
+            forecast = (share.finish, share.measured) if share and share.sharers >= 1 and share.finish is not None else None
+            if share and share.factor > 1.25 and long_step:
+                slot.contended_step = True
             rem = eta.remaining(slot.plan, slot.step_label, f, elapsed_step, slot.size_gb, slot.passes, self.timings,
-                                slot.used_only)
+                                slot.used_only, recent_rate=recent, long_seconds=forecast)
             slot.remaining, slot.remaining_measured = (rem if rem else (None, False))
             old = slot.attention
             slot.attention = eta.attention(
                 now=now, last_progress_at=slot.last_progress_at, stall_seconds=self.settings.stall_minutes * 60,
                 key=eta.plan_key(slot.step_label, slot.used_only), size_gb=slot.size_gb, passes=slot.passes, step_frac=f,
                 step_elapsed=elapsed_step, started_at=slot.started_at, expected_total=slot.expected_total,
-                timings=self.timings)
+                timings=self.timings, recent_rate=recent, contention=share.factor if share else 1.0)
             if slot.attention and not old:
                 self.attention_raised.emit(slot.index)
             line1 = f"Started {eta.fmt_clock(slot.started_at)} · running {eta.fmt_duration(now - slot.started_at)}"
@@ -553,11 +602,65 @@ class Controller(QObject):
                 line2 = (f"About {eta.fmt_duration(slot.remaining)} left · done around "
                          f"{eta.fmt_clock(now + slot.remaining)}" + ("" if slot.remaining_measured else " (rough guess)"))
             slot.timing_text = line1 + "\n" + line2
+            slot.share_note = self._share_note(slot, share)
+        elif slot.state == SlotState.NEEDS_WORK:
+            slot.timing_text = ""
+            slot.share_note = self._share_note(slot, self._shares(now, waiting=True).get(slot.index))
         elif slot.finished_at and slot.state in (SlotState.DONE, SlotState.FAILED, SlotState.ALREADY_OK):
+            slot.share_note = ""
             slot.timing_text = (f"Finished {eta.fmt_clock(slot.finished_at)} · {eta.fmt_ago(now - slot.finished_at)}"
                                 f" · took {eta.fmt_duration(slot.finished_at - slot.started_at)}")
         else:
             slot.timing_text = ""
+            slot.share_note = ""
+
+    # ------------------------------------------------------------ drives that share a USB link
+    def _shares(self, now: float, waiting: bool = False) -> dict:
+        """Per drive: its share of the links it sits behind and the forecast for its long work. Recomputed every few
+        seconds; any failure just means the older, simpler estimates are used. With waiting=True the drives that have not
+        been started are included as if they started now (for the note on their tiles); the estimates of drives that are
+        working never include them."""
+        if now - self._shares_at[waiting] < 3.0:
+            return self._shares_cache[waiting]
+        self._shares_at[waiting] = now
+        try:
+            entries = []
+            s = self.effective_settings()
+            for slot in self.slots:
+                wanted = (SlotState.PROCESSING, SlotState.NEEDS_WORK) if waiting else (SlotState.PROCESSING,)
+                if slot.drive is None or slot.state not in wanted:
+                    continue
+                chain = getattr(slot.drive, "link_chain", None) or []
+                if slot.state == SlotState.PROCESSING:
+                    entries.append(shares_mod.Entry(
+                        slot.index, slot.plan, slot.step_label, self._step_frac(slot), slot.drive.size_bytes, slot.passes,
+                        slot.used_only, chain, False, slot.rate_win.rate(now)))
+                else:                                          # waiting: assume it starts now, together with the others
+                    plan = plan_steps(s)
+                    entries.append(shares_mod.Entry(
+                        slot.index, plan, plan[0], 0.0, slot.drive.size_bytes, s.overwrite_passes,
+                        not s.full_volume_encryption, chain, True, None))
+            self._shares_cache[waiting] = shares_mod.compute(entries, self.timings)
+        except Exception as e:   # noqa: BLE001 - the forecast is an extra; never let it break the window
+            self._shares_cache[waiting] = {}
+            if not self._shares_warned:
+                self._shares_warned = True
+                diag.log.warning("Shared-link forecast failed (%s: %s); using the simple estimates", type(e).__name__, e)
+        return self._shares_cache[waiting]
+
+    @staticmethod
+    def _share_note(slot: Slot, share) -> str:
+        """A line for the tile when this drive is held back by a USB link shared with others. '' otherwise."""
+        if share is None or share.sharers < 1:
+            return ""
+        others = f"{share.sharers} other drive{'s' if share.sharers != 1 else ''}"
+        total = f"{share.link_cap / 1e6:.0f} MB/s in total"
+        if slot.state == SlotState.PROCESSING:
+            return (f"Sharing a {share.link} link with {others} ({total}), about {share.rate / 1e6:.0f} MB/s each. "
+                    f"It speeds up as they finish.")
+        done = f"about {eta.fmt_duration(share.finish)} for the long steps" if share.finish else "slower"
+        return (f"If processed together with {others} on this {share.link} link ({total}): {done}. "
+                f"A USB 3 hub, or splitting them across ports, would be faster.")
 
     def tick(self) -> None:
         """Every few seconds: keep clocks, time left and warnings fresh even when nothing else changes."""
@@ -569,9 +672,10 @@ class Controller(QObject):
                     self._scan_warned.add(limit)
                     diag.log.warning("First scan still running after %d s", limit)
         for slot in self.slots:
-            before = (slot.timing_text, slot.attention)
+            before = (slot.timing_text, slot.attention, slot.share_note)
             self._update_timing(slot, now)
-            if (slot.timing_text, slot.attention) != before:
+            self._log_progress(slot, now, heartbeat_only=True)             # a step that stops reporting still leaves a trail
+            if (slot.timing_text, slot.attention, slot.share_note) != before:
                 self.slot_changed.emit(slot.index)
         self.batch_changed.emit()
 

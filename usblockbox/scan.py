@@ -10,21 +10,22 @@ from .safety import eligibility_findings
 BASIC_TYPES = {"basic", "microsoft basic data", "exfat", "ntfs", "fat32"}
 RESERVED_MAX = 32 * 1024 * 1024   # Microsoft Reserved partition size tolerated on GPT
 USB2_GB_PER_SECOND = 0.030        # what a USB 2.0 connection really moves (about 30 MB/s), not the 480 Mbit/s on the box
-SLOW_LINK_HOURS = 1.0             # warn when writing the drive once would take longer than this at that speed
+SLOW_LINK_TOTAL_HOURS = 1.0       # warn when the whole job would take longer than this at that speed (any drive size)
 
 
 def slow_link_finding(drive: DriveInfo, passes: int) -> Optional[Finding]:
-    """A note (never a block) when a big drive sits on a USB 2.0 port or hub: overwriting it will take hours."""
+    """A note (never a block) when a drive sits on a USB 2.0 port or hub and the whole job would take over an hour."""
     if not (0 <= drive.link_speed < 3) or drive.size_gb <= 0:
         return None
     writes = max(passes, 0) + 1                    # the overwrite passes plus the encryption write
     hours = drive.size_gb / USB2_GB_PER_SECOND / 3600
-    if hours < SLOW_LINK_HOURS:
-        return None
     total = hours * writes
+    if total < SLOW_LINK_TOTAL_HOURS:
+        return None
     return Finding("SLOW_LINK", Severity.INFO,
                    f"This {drive.size_gb:.0f} GB drive is connected at USB 2.0 speed (a USB 2.0 port or hub). Each full "
-                   f"write takes about {hours:.1f} h, so expect roughly {total:.0f} h in all. A USB 3 port or hub is much faster.")
+                   f"write takes about {hours:.1f} h, so expect roughly {total:.1f} h in all, longer if other drives share "
+                   f"the same hub. A USB 3 port or hub is much faster.")
 
 
 def _history_ok(history: list[dict]) -> bool:

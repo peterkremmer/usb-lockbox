@@ -23,7 +23,7 @@ import threading
 import time
 from typing import Optional
 
-from .. import diag, nativedisk, usbports
+from .. import diag, nativedisk, throughput, usbports
 from ..junk import junk_label
 from ..models import BitLockerInfo, DriveInfo, PartitionInfo, Port, VolumeInfo, clean_serial
 from .base import Backend, BackendError, Cancelled, CancelCheck, Progress
@@ -149,7 +149,8 @@ foreach($d in @(Get-Disk | Where-Object { $_.BusType -eq 'USB' })){
 ConvertTo-Json -InputObject @($out) -Depth 3
 """
 
-DETAIL_TTL = 300          # seconds a drive's details are reused (they are also dropped the moment the drive is gone)
+DETAIL_TTL = 1800         # seconds a drive's details are reused (they are also dropped the moment the drive is gone).
+                          # Reading an encrypted drive locks and unlocks it to test the password, so do it rarely.
 DETAIL_WORKERS = 3        # drives read at the same time
 DETAIL_RETRY = 30         # seconds before a drive whose read failed is tried again
 
@@ -249,6 +250,35 @@ ConvertTo-Json -InputObject @($n | Select-Object -Unique)
         return d.setdefault("_detail", {}), d.setdefault("_detail_fail", {})
 
     _unreadable: list = []
+    _busy: set = set()               # disks being processed right now: the listing must not touch them
+
+    def hold(self, disk_number: int) -> None:
+        """Called when processing starts on a disk. While held, the listing neither re-reads nor locks/unlocks it."""
+        with self._detail_lock:
+            self.__dict__["_busy"] = set(self._busy) | {int(disk_number)}
+        self._throughput().ensure_running()
+
+    def _throughput(self) -> "throughput.ThroughputMonitor":
+        mon = self.__dict__.get("_tp")
+        if mon is None:
+            mon = self.__dict__["_tp"] = throughput.ThroughputMonitor(run_ps, lambda: set(self._busy), self._describe_for_log)
+        return mon
+
+    def _describe_for_log(self, disk_number: int) -> Optional[dict]:
+        """Serial and USB link chain of a disk being processed, from what was read about it earlier."""
+        with self._detail_lock:
+            entry = self._store()[0].get(int(disk_number))
+        if not entry:
+            return None
+        d = entry[1]
+        return {"label": "serial %s" % d.serial, "chain": self._scanner.link_chain(d.location_path) if d.location_path else []}
+
+    def release(self, disk_number: int) -> None:
+        with self._detail_lock:
+            self.__dict__["_busy"] = set(self._busy) - {int(disk_number)}
+        mon = self.__dict__.get("_tp")
+        if mon is not None:
+            mon.poke()
 
     def unreadable_drives(self) -> list[tuple[str, str]]:
         return list(self._unreadable)
@@ -276,14 +306,17 @@ ConvertTo-Json -InputObject @($n | Select-Object -Unique)
         now = time.monotonic()
         with self._detail_lock:
             cache, failed = self._store()
+            busy = set(self._busy) & set(wanted)
             for n in list(cache):
+                if n in busy:
+                    continue                                      # being processed: keep what we know, read nothing
                 if n not in wanted or cache[n][0] != wanted[n] or now - cache[n][2] > DETAIL_TTL:
                     del cache[n]                                  # gone, replaced by another drive, or too old
             for n in list(failed):
                 if n not in wanted:
                     del failed[n]
             ready = {n: cache[n][1] for n in wanted if n in cache}
-            todo = [n for n in wanted if n not in ready and now - failed.get(n, -1e9) >= DETAIL_RETRY]
+            todo = [n for n in wanted if n not in ready and n not in busy and now - failed.get(n, -1e9) >= DETAIL_RETRY]
 
         def report() -> None:
             if on_ready:
@@ -392,18 +425,36 @@ ConvertTo-Json -InputObject @($n | Select-Object -Unique)
                 d.bitlocker = BitLockerInfo(True, bool(info.get("Protected")), info.get("Method", ""),
                                             float(info.get("Percent", 0)), bool(info.get("Locked")),
                                             _as_list(info.get("Protectors")), False)
-                if not d.bitlocker.locked:
-                    pw = self._pw()
-                    d.bitlocker.unlocked_with_fixed_password = bool(pw) and self.verify_password(d, pw)
-                else:
-                    pw = self._pw()
-                    if pw and self.verify_password(d, pw):
-                        d.bitlocker.unlocked_with_fixed_password = True
-                        d.bitlocker.locked = False
+                d.bitlocker.fully_encrypted = info.get("Status") == "FullyEncrypted"
+                # Reading is read-only: it never locks or unlocks anything. Whether the fixed password opens the drive is
+                # tested separately, once, when a drive is first checked (prove_fixed_password).
             if not (d.bitlocker.present and d.bitlocker.locked):
                 t0 = time.perf_counter()
                 v.file_count, v.file_detail = self._count_files(v.drive_letter)
                 diag.note("count files on %s: (%s files)" % (v.drive_letter, v.file_count), time.perf_counter() - t0)
+
+    def link_chain(self, drive: DriveInfo) -> list:
+        return self._scanner.link_chain(drive.location_path) if drive.location_path else []
+
+    def prove_fixed_password(self, drive: DriveInfo, password: str) -> None:
+        """Does the fixed password open this already-encrypted drive? The only way to know is to lock the volume and unlock
+        it with the password, which interrupts any encryption still running, so it is done only for a drive that Windows
+        reports as FULLY encrypted, that is not being processed, and not from the listing: once, when the drive is first
+        checked. A locked drive that the password opens is counted for files afterwards, as before."""
+        bl = drive.bitlocker
+        if not (password and bl.present and bl.fully_encrypted and bl.percent_encrypted >= 100):
+            return
+        if drive.disk_number in self._busy:
+            return
+        was_locked = bl.locked
+        ok = self.verify_password(drive, password)
+        bl.unlocked_with_fixed_password = ok
+        if ok:
+            bl.locked = False
+            if was_locked:
+                for v in drive.volumes:
+                    if v.drive_letter and v.file_count is None:
+                        v.file_count, v.file_detail = self._count_files(v.drive_letter)
 
     @staticmethod
     def _count_files(letter: str, cap: int = 200_000) -> tuple[Optional[int], str]:
@@ -633,12 +684,18 @@ ConvertTo-Json -InputObject @($n | Select-Object -Unique)
 
     def wait_encrypted(self, drive, letter, progress, cancelled):
         t0 = time.time()
+        last = [None, 0.0]
         while True:
             if cancelled():
                 raise Cancelled("Cancelled by operator.")
             info = _json(run_ps(_BL_SCRIPT.replace("%LETTER%", letter))) or {}
             pct = float(info.get("Percent", 0))
             progress(pct / 100.0)
+            state = (info.get("Status"), bool(info.get("Locked")))
+            if state != last[0] or time.time() - last[1] >= 120:       # Windows' own view: status and locked or not (the percentage is logged by the app)
+                diag.log.info("Encrypt disk %s (%s:): %.1f%%, status %s%s", drive.disk_number, letter, pct,
+                              info.get("Status"), ", LOCKED" if info.get("Locked") else "")
+                last[0], last[1] = state, time.time()
             if pct >= 100 and info.get("Status") == "FullyEncrypted":
                 return
             if time.time() - t0 > 6 * 3600:

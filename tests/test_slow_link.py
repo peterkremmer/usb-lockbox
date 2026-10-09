@@ -14,13 +14,15 @@ def _drive(gb, speed):
 def test_big_drive_on_usb2_gets_a_note_with_a_time():
     f = slow_link_finding(_drive(248, 2), passes=3)
     assert f and f.code == "SLOW_LINK" and "USB 2.0" in f.message and "248 GB" in f.message
-    assert "2.3 h" in f.message and "9 h" in f.message          # 248 GB at 30 MB/s = 2.3 h per write, 4 writes
+    assert "2.3 h" in f.message and "9.2 h" in f.message          # 248 GB at 30 MB/s = 2.3 h per write, 4 writes
 
 
 def test_no_note_for_fast_small_or_unknown_links():
     assert slow_link_finding(_drive(248, 3), 3) is None          # SuperSpeed
     assert slow_link_finding(_drive(248, -1), 3) is None         # unknown: say nothing rather than guess
-    assert slow_link_finding(_drive(32, 2), 3) is None           # 32 GB: about 18 minutes a write
+    assert slow_link_finding(_drive(32, 2), 3) is not None       # 32 GB, 3 passes: over an hour in all
+    assert slow_link_finding(_drive(32, 2), 0) is None           # no overwrite: about 36 minutes
+    assert slow_link_finding(_drive(8, 2), 3) is None            # small drive: short either way
     assert slow_link_finding(_drive(128, 2), 0) is not None      # 1.2 h for even one write
 
 

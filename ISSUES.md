@@ -22,12 +22,14 @@ Known gaps and things still to verify. IDs (LB-###) are permanent so commits and
 
 - [ ] **LB-142 First scan can take minutes on a PC with many USB drives and hubs.** A log from a PC with 9 drives and 16 hubs showed the drive listing at 89.6 s and the hub-location lookup timing out at 60 s. 0.2.1 reads locations natively, shows port tiles first, reads each drive once and isolates a drive that will not answer. Still to verify on that PC: first-scan time and `--compare-native`.
 - [ ] **LB-144 Direct partition and volume reads are off by default** (`USBLOCKBOX_NATIVE_DISKS=1` turns them on). Turn them on by default only if `--compare-native` shows PowerShell's answers match on real hardware and the per-query timings show they are needed.
+- [ ] **LB-149 Shared USB links: forecasts need real-hardware confirmation.** 0.2.1 forecasts time left and judges slowness using each drive's share of its hub link (capacities are rules of thumb by USB speed; measured rates take over when available). Verify against `Throughput ...` log lines with 3-4 drives on one hub.
 - [ ] **LB-145 Limit on drives processed at once:** only up to 4 drives at once have been tested. Decide on a cap after testing more.
 - [ ] **LB-138 Port tiles can take about a minute to appear on a PC with endpoint-security software.** Cause not measured. Next step: the diagnostics bundle from that PC, then fix the slowest step.
 - [ ] **LB-139 The launcher check is untested on a clean Windows PC.** `run_usblockbox.bat` and `tools/preflight.py` are unit-tested for their logic only. Try it on a PC with no Python, with a per-user Python, and with a system Python missing the packages.
 
 ## Resolved
 
+- [x] **LB-148 Encryption could stall or run very slowly while the drive listing re-read the same drive** (locks and unlocks it to test the password). Processing drives are now left alone (0.2.1). To confirm on hardware: two drives encrypting together should show steadily rising percentages in the log.
 - [x] **LB-146 False "N times slower than usual" warnings** from a speed measured once; and **strange characters in a drive serial number**. Fixed in 0.2.1.
 - [x] **LB-147 Large drive on a USB 2.0 port or hub** now gets a note with a time estimate (0.2.1). **A drive that will not answer** now shows "NOT RESPONDING" on its tile (0.2.1).
 - [x] **LB-143 Every wipe failed on a PC with 9 USB drives.** The per-step safety re-check listed all USB drives each time and timed out. It now reads only the one drive, one at a time (0.2.1).

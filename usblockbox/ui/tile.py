@@ -113,6 +113,8 @@ class Tile(QFrame):
         lines: list[str] = []
         if st == SlotState.PROCESSING and slot.attention:
             lines.append("⚠ " + slot.attention)
+        if getattr(slot, "share_note", "") and st in (SlotState.NEEDS_WORK, SlotState.PROCESSING):
+            lines.append("ⓘ " + slot.share_note)
         if st in (SlotState.NEEDS_WORK, SlotState.REJECTED, SlotState.DONE, SlotState.ALREADY_OK, SlotState.FAILED):
             if slot.message:
                 lines.append(slot.message)
