@@ -55,8 +55,9 @@ def test_off_by_default_and_only_windows(monkeypatch):
     assert not nd.enabled()
     monkeypatch.setenv("USBLOCKBOX_NATIVE_DISKS", "1")
     assert nd.enabled()
+    monkeypatch.setattr(nd.sys, "platform", "linux")         # pretend: never touch a real disk, even on Windows CI
     with pytest.raises(OSError):
-        nd.native_layout(1)                                  # not Windows here
+        nd.native_layout(1)
 
 
 def test_listing_uses_the_direct_read_and_falls_back(monkeypatch):
