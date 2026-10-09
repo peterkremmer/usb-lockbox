@@ -301,9 +301,11 @@ def test_windows_partition_step_reports_diskpart_failure(monkeypatch):
     def fail(self, s, timeout=120):
         raise BackendError("diskpart failed: not convertible", "DISKPART")
     monkeypatch.setattr(w.WindowsBackend, "_diskpart", fail)
+    monkeypatch.setattr(w.time, "sleep", lambda s: None)
     with pytest.raises(BackendError) as e:
         be.init_partition_format(DriveInfo(2, "uid", "ser"), "GPT", "exFAT", "X")
-    assert "not convertible" in str(e.value) and not ps
+    # one refresh before the single retry, but never a partition or format command
+    assert "not convertible" in str(e.value) and not any("New-Partition" in x or "Format-Volume" in x for x in ps)
 
 
 def test_shell_hardware_detection_is_paused_once_and_always_restarted(monkeypatch):

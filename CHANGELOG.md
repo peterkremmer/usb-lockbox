@@ -2,6 +2,10 @@
 
 What changed for people using the app. The notes on each GitHub release repeat the matching section.
 
+## Unreleased
+
+- Fix: when several drives were started together, one or two could fail at "Partition and format" with "The specified disk is not convertible". That step now runs one drive at a time and retries once after refreshing Windows' disk list.
+
 ## 0.2.1
 
 - Fixed: on a PC where Windows answers drive queries slowly, every drive could fail. The safety re-check before each step now reads only that one drive, one at a time, instead of listing all USB drives (about 90 seconds with 9 drives). A step that still times out now says so plainly and tells you the drive may be left wiped but not formatted, so process it again.

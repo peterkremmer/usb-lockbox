@@ -614,26 +614,25 @@ ConvertTo-Json -InputObject @($n | Select-Object -Unique)
             if last:
                 cls._hw_restart()
 
-    def _diskpart(self, script: str, timeout: int = 120) -> str:
-        """Run a diskpart script (only ever built from an integer disk number and fixed words)."""
-        import tempfile
-        fd, path = tempfile.mkstemp(prefix="usblockbox_dp_", suffix=".txt")
-        try:
-            with os.fdopen(fd, "w") as f:
-                f.write(script)
+    # diskpart talks to the one Virtual Disk Service. Two drives cleaned at the same moment can leave one of
+    # them "not convertible" (seen with three drives started together), so this step runs one drive at a time.
+    _dp_lock = threading.Lock()
+
+    def _clean_and_convert(self, n: int, style: str) -> None:
+        script = f"select disk {n}\nclean\nconvert {style.lower()}\n"
+        with self._dp_lock:
             try:
-                p = subprocess.run(["diskpart.exe", "/s", path], capture_output=True, text=True, timeout=timeout,
-                                   creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
-            except (OSError, subprocess.TimeoutExpired) as e:
-                raise BackendError(f"diskpart failed to run: {e}", "DISKPART")
-        finally:
-            try:
-                os.remove(path)
-            except OSError:
-                pass
-        if p.returncode != 0:
-            raise BackendError("diskpart failed: " + ((p.stdout or "") + (p.stderr or "")).strip()[-600:], "DISKPART")
-        return p.stdout
+                self._diskpart(script)
+            except BackendError as e:
+                if "not convertible" not in str(e).lower() and "not convertable" not in str(e).lower():
+                    raise
+                diag.log.warning("diskpart said disk %s is not convertible; refreshing and retrying once", n)
+                try:
+                    run_ps("Update-HostStorageCache", timeout=60)
+                except Exception:
+                    pass
+                time.sleep(3)
+                self._diskpart(script)
 
     def init_partition_format(self, drive, style, fs, label):
         """Partition, format, and only then give the volume a letter, stopping at the first error.
@@ -648,7 +647,7 @@ ConvertTo-Json -InputObject @($n | Select-Object -Unique)
             raise BackendError(f"Unsupported partition style {style!r}.", "BAD_STYLE")
         safe_label = re.sub(r"[^A-Za-z0-9_ -]", "", label)[:11]
         with self._shell_hw_paused():
-            self._diskpart(f"select disk {n}\nclean\nconvert {style.lower()}\n")
+            self._clean_and_convert(n, style)
             out = run_ps(
                 f"$ErrorActionPreference='Stop'; Update-HostStorageCache; "
                 f"$d=Get-Disk -Number {n}; "
